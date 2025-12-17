@@ -1,12 +1,12 @@
 {
   "name": "ponswarp",
   "private": true,
-  "version": "0.7.2",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "build:wasm": "wasm-pack build ../pons-core-wasm --target web --out-dir lib/ponscorewasm --release",
     "predev": "npm run build:wasm",
-    "prebuild": "npm run build:wasm",
+    "prebuild": "node -e \"if (!process.env.CI) { try { require('child_process').execSync('npm run build:wasm', { stdio: 'inherit' }); } catch (e) { process.exit(1); } }\"",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
