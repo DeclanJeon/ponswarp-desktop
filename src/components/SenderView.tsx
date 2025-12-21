@@ -24,6 +24,7 @@ import {
 import { SwarmManager, MAX_DIRECT_PEERS } from '../services/swarmManager';
 import { createManifest, formatBytes } from '../utils/fileUtils';
 import { scanFiles, processInputFiles } from '../utils/fileScanner';
+import { compressFiles } from '../utils/zipUtils';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AppMode } from '../types/types';
 import { useTransferStore } from '../store/transferStore';
@@ -209,46 +210,39 @@ const SenderView: React.FC<SenderViewProps> = () => {
         // 🚀 파일 전송 시작
         const files = selectedFilesRef.current;
         if (files.length > 0) {
-          const file = files[0];
           const jobId = `send-${Date.now()}`;
 
           console.log(
-            '[SenderView] 🚀 Starting file transfer to accepted peer:',
+            `[SenderView] 🚀 Starting native transfer of ${files.length} items to accepted peer:`,
             data.peerId
           );
 
           try {
-            // Native 파일 시스템 경로가 필요하므로 File 객체에서 path 추출
-            // Tauri에서는 File 객체에 path 속성이 있을 수 있음
-            const filePath = (file as any).path || file.name;
+            // 모든 파일의 네이티브 경로 추출
+            const filePaths = files.map((f: any) => f.path).filter(Boolean);
 
-            if (!filePath || filePath === file.name) {
+            if (filePaths.length === 0) {
               console.error(
-                '[SenderView] ❌ Cannot get native file path. File:',
-                file
-              );
-              // 임시: 파일 경로를 알 수 없으면 에러 처리
-              // TODO: Tauri의 파일 다이얼로그로 선택한 파일은 path가 있음
-              console.error(
-                '[SenderView] Native file path not available. Please use file dialog to select files.'
+                '[SenderView] ❌ No valid native file paths found.'
               );
               setStatus('IDLE');
               return;
             }
 
             const bytesSent =
-              await nativeTransferService.sendFileToAcceptedPeer(
+              await nativeTransferService.sendFilesToAcceptedPeer(
                 data.peerId,
-                filePath,
+                filePaths,
                 jobId
               );
-            console.log('[SenderView] ✅ File sent:', bytesSent, 'bytes');
+            console.log(
+              '[SenderView] ✅ Transfer complete:',
+              bytesSent,
+              'bytes'
+            );
             setStatus('DONE');
           } catch (error: any) {
-            console.error('[SenderView] ❌ File transfer failed:', error);
-            console.error(
-              `[SenderView] File transfer failed: ${error?.message || 'Unknown error'}`
-            );
+            console.error('[SenderView] ❌ Native transfer failed:', error);
             setStatus('IDLE');
           }
         }
@@ -483,12 +477,12 @@ const SenderView: React.FC<SenderViewProps> = () => {
   const selectedFilesRef = useRef<File[]>([]);
 
   // 🆕 네이티브 파일 선택 핸들러 (Zero-Copy 최적화)
-  const handleNativeFileSelect = async () => {
+  const handleNativeFileSelect = async (isFolder: boolean = false) => {
     try {
       // 1. Tauri 파일 다이얼로그 오픈 (Rust 백엔드에서 구현)
       const selected = await invoke('open_file_dialog', {
-        multiple: true,
-        directory: false,
+        multiple: !isFolder, // 폴더 선택 시에는 multiple이 의미가 다를 수 있음 (보통 폴더 하나)
+        directory: isFolder,
       });
 
       if (!selected) return;
@@ -589,8 +583,38 @@ const SenderView: React.FC<SenderViewProps> = () => {
         rootName: manifest.rootName,
       });
     } else {
-      // WebRTC 모드: 기존 방식대로 File 객체 사용
-      const result = createManifest(scannedFiles);
+      // WebRTC 모드: 압축 로직 적용
+      let processedFiles = scannedFiles;
+      
+      // 폴더 구조이거나 파일이 여러 개이면 압축
+      const shouldCompress = scannedFiles.length > 1 || (scannedFiles.length > 0 && scannedFiles[0].path.includes('/'));
+
+      if (shouldCompress) {
+        setStatus('PREPARING');
+        console.log('[SenderView] 📦 Compressing files...');
+        
+        try {
+          // 임시 Manifest 생성 (이름 추출용)
+          const tempManifest = createManifest(scannedFiles).manifest;
+          const rootName = tempManifest.rootName;
+          
+          const zipFile = await compressFiles(scannedFiles, rootName);
+          console.log('[SenderView] ✅ Compression complete:', zipFile.name, zipFile.size);
+          
+          // 압축된 파일을 단일 항목으로 취급
+          processedFiles = [{
+            file: zipFile,
+            path: zipFile.name,
+            nativeSize: zipFile.size
+          }];
+        } catch (error) {
+          console.error('[SenderView] ❌ Compression failed:', error);
+          setStatus('IDLE');
+          return;
+        }
+      }
+
+      const result = createManifest(processedFiles);
       manifest = result.manifest;
       files = result.files;
 
@@ -605,8 +629,8 @@ const SenderView: React.FC<SenderViewProps> = () => {
     setManifest(manifest);
     selectedFilesRef.current = files; // Native 모드용 파일 저장
 
-    // 여러 파일이면 ZIP 압축 준비 중 표시
-    if (files.length > 1) {
+    // 여러 파일이면 ZIP 압축 준비 중 표시 (이미 압축 완료했으므로 WAITING으로 직행하거나 짧게 표시)
+    if (files.length > 1) { // 압축 후에는 보통 1개지만, Native 모드 등 고려
       setStatus('PREPARING');
     } else {
       setStatus('WAITING');
@@ -684,24 +708,24 @@ const SenderView: React.FC<SenderViewProps> = () => {
             className={`w-full max-w-2xl p-2 ${glassPanelClass}`}
           >
             {/* Drag & Drop Zone (Focal Point) */}
-            <div
-              onDragEnter={handleDragEnter}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
-              // [수정] 클릭 시 Native 모드면 다이얼로그, 아니면 input 클릭
-              onClick={e => {
-                // 이벤트 버블링 방지
-                if (e.target !== e.currentTarget) return;
+              <div
+                onDragEnter={handleDragEnter}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                // [수정] 클릭 시 Native 모드면 다이얼로그, 아니면 input 클릭
+                onClick={e => {
+                  // 이벤트 버블링 방지
+                  if (e.target !== e.currentTarget) return;
 
-                if (isNativeMode) {
-                  handleNativeFileSelect();
-                } else {
-                  fileInputRef.current?.click();
-                }
-              }}
-              className="border-2 border-dashed border-cyan-500/30 rounded-[1.8rem] py-8 px-4 md:py-16 md:px-10 flex flex-col items-center justify-center text-center transition-all hover:border-cyan-400/60 hover:bg-cyan-500/5 cursor-pointer"
-            >
+                  if (isNativeMode) {
+                    handleNativeFileSelect(false);
+                  } else {
+                    fileInputRef.current?.click();
+                  }
+                }}
+                className="border-2 border-dashed border-cyan-500/30 rounded-[1.8rem] py-8 px-4 md:py-16 md:px-10 flex flex-col items-center justify-center text-center transition-all hover:border-cyan-400/60 hover:bg-cyan-500/5 cursor-pointer"
+              >
               <input
                 type="file"
                 className="hidden"
@@ -737,7 +761,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
                     if (e.target !== e.currentTarget) return;
 
                     if (isNativeMode) {
-                      handleNativeFileSelect();
+                      handleNativeFileSelect(false);
                     } else {
                       fileInputRef.current?.click();
                     }
@@ -756,8 +780,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
                     if (e.target !== e.currentTarget) return;
 
                     if (isNativeMode) {
-                      // TODO: Implement native folder selection
-                      handleNativeFileSelect();
+                      handleNativeFileSelect(true);
                     } else {
                       folderInputRef.current?.click();
                     }

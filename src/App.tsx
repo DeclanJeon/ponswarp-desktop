@@ -51,6 +51,7 @@ const App: React.FC = () => {
   const [isNativeMode, setIsNativeMode] = useState(false);
   const [webRTCSupported, setWebRTCSupported] = useState(true);
   const [bootstrapNodeStatus, setBootstrapNodeStatus] = useState<any>(null);
+  const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
     const path = window.location.pathname;
@@ -75,38 +76,55 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const initNative = async () => {
-      const result = await initializeNativeServices();
-      setIsNativeMode(result.isNative);
+      try {
+        // Tauri API 사용 가능 여부 확인
+        if ((window as any).__TAURI__) {
+          const result = await initializeNativeServices();
+          setIsNativeMode(result.isNative);
 
-      // 🚨 WebRTC 지원 여부 확인
-      const rtcSupported = isWebRTCSupported();
-      setWebRTCSupported(rtcSupported);
-      setStoreWebRTCSupported(rtcSupported);
+          // 🚨 WebRTC 지원 여부 확인
+          const rtcSupported = isWebRTCSupported();
+          setWebRTCSupported(rtcSupported);
+          setStoreWebRTCSupported(rtcSupported);
 
-      if (result.runtimeInfo) {
-        setNativeInfo(result.runtimeInfo);
+          if (result.runtimeInfo) {
+            setNativeInfo(result.runtimeInfo);
 
-        if (!rtcSupported && result.isNative) {
-          // 🆕 Native 환경에서 WebRTC 미지원 시 QUIC 전송 모드 활성화
-          setUseNativeTransfer(true);
-          toast.info(
-            `🚀 Native QUIC Transfer Mode enabled (${result.runtimeInfo.platform})`
-          );
+            if (!rtcSupported && result.isNative) {
+              // 🆕 Native 환경에서 WebRTC 미지원 시 QUIC 전송 모드 활성화
+              setUseNativeTransfer(true);
+              toast.info(
+                `🚀 Native QUIC Transfer Mode enabled (${result.runtimeInfo.platform})`
+              );
+              console.log(
+                '[App] WebRTC not supported - Using Native QUIC Transfer'
+              );
+            } else if (result.isNative) {
+              toast.success(
+                `Native Mode: ${result.runtimeInfo.platform} ${result.runtimeInfo.arch}`
+              );
+            }
+          }
+        } else {
+          // 웹 환경 fallback
           console.log(
-            '[App] WebRTC not supported - Using Native QUIC Transfer'
-          );
-        } else if (result.isNative) {
-          toast.success(
-            `Native Mode: ${result.runtimeInfo.platform} ${result.runtimeInfo.arch}`
+            '[App] Web environment detected - Native features disabled'
           );
         }
+      } catch (error) {
+        console.error('[App] Native initialization failed:', error);
+        toast.error('네이티브 기능 초기화 실패');
+      } finally {
+        // 앱 준비 상태 설정
+        setIsReady(true);
       }
     };
 
-    initNative();
+    // 약간의 지연 후 초기화 실행 (Tauri API 준비 대기)
+    const timer = setTimeout(initNative, 100);
 
     return () => {
-      cleanupNativeServices();
+      clearTimeout(timer);
     };
   }, []);
 
@@ -161,6 +179,18 @@ const App: React.FC = () => {
 
     initSignaling();
   }, []);
+
+  // ✅ 수정: 로딩 상태 표시
+  if (!isReady) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-black text-white">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-cyan-500 mx-auto mb-4"></div>
+          <p className="text-lg">PonsWarp 로딩 중...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <ErrorBoundary>

@@ -224,7 +224,7 @@ const ReceiverView: React.FC = () => {
       if (connectionTimeoutRef.current)
         clearTimeout(connectionTimeoutRef.current);
 
-      // 🆕 Native QUIC 모드
+      // Native Mode (QUIC) 로직 ... (유지)
       if (isNativeMode) {
         console.log('[ReceiverView] 🚀 Native QUIC mode - Joining room:', id);
 
@@ -244,38 +244,22 @@ const ReceiverView: React.FC = () => {
         return;
       }
 
-      // WebRTC 모드
-      // 🚨 [핵심 수정] 연결 타임아웃 로직 개선
-      connectionTimeoutRef.current = setTimeout(() => {
-        const currentStatus = statusRef.current;
-        console.log(
-          '[ReceiverView] Timeout check. Current status:',
-          currentStatus
-        );
-
-        // 🚨 [수정] 메타데이터를 받은 경우(정상 연결) 타임아웃 무시
-        if (
-          currentStatus === 'WAITING' ||
-          currentStatus === 'RECEIVING' ||
-          currentStatus === 'DONE'
-        ) {
-          console.log('[ReceiverView] Timeout ignored - already connected');
-          return;
-        }
-
-        // 🚨 [수정] 아직 CONNECTING 상태일 때만 타임아웃 처리
-        if (currentStatus === 'CONNECTING') {
-          console.warn(
-            '[ReceiverView] Connection timed out. Status:',
-            currentStatus
-          );
-          setErrorMsg('Connection timed out. Sender may be offline.');
-          setStatus('ERROR');
-          transferService.cleanup();
-        }
-      }, CONNECTION_TIMEOUT_MS);
+      // [WebRTC 모드일 때 WAN 통신 준비]
+      console.log('[ReceiverView] Starting WebRTC connection sequence...');
 
       try {
+        // 1. 시그널링 서비스가 연결되어 있는지 확인하고 연결
+        // (transferService 내부 로직에 의존하기보다 명시적으로 호출 권장)
+        // await transferService.connectSignaling(); // (메서드가 있다면)
+
+        // [추가] TURN 설정 요청 (서비스 내부적으로 iceServers를 갱신하도록 유도하거나 글로벌 설정 주입)
+        // transferService가 내부적으로 connect() 시 TURN을 가져오지 않는다면
+        // 여기서 signalingService를 직접 import해서 호출해도 됩니다.
+        // 하지만 가장 깔끔한 것은 transferService.initReceiver 내부가
+        // SwarmManager.initSender처럼 TURN을 먼저 가져오게 수정되어 있는 것입니다.
+        // 여기서는 에러 방지를 위해 initReceiver 호출만 유지하되,
+        // **services/webRTCService.ts** 파일이 있다면 Sender와 동일하게 patch가 필요합니다.
+
         await transferService.initReceiver(id.toUpperCase());
       } catch (e) {
         if (connectionTimeoutRef.current)

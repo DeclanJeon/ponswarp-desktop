@@ -20,6 +20,7 @@ pub struct QuicServer {
     /// 수락된 연결을 외부로 전달하는 채널
     connection_tx: Option<mpsc::Sender<AcceptedConnection>>,
     connection_rx: Option<mpsc::Receiver<AcceptedConnection>>,
+    prebound_socket: Option<std::net::UdpSocket>,
 }
 
 impl QuicServer {
@@ -30,7 +31,20 @@ impl QuicServer {
             bind_addr,
             connection_tx: Some(tx),
             connection_rx: Some(rx),
+            prebound_socket: None,
         }
+    }
+
+    pub fn new_with_socket(socket: std::net::UdpSocket) -> Result<Self> {
+        let bind_addr = socket.local_addr()?;
+        let (tx, rx) = mpsc::channel(16);
+        Ok(Self {
+            endpoint: None,
+            bind_addr,
+            connection_tx: Some(tx),
+            connection_rx: Some(rx),
+            prebound_socket: Some(socket),
+        })
     }
     
     /// 수락된 연결을 받는 채널 (Sender가 파일 전송에 사용)
@@ -40,7 +54,19 @@ impl QuicServer {
     
     pub async fn start(&mut self) -> Result<()> {
         let server_config = self.configure_server()?;
-        let endpoint = Endpoint::server(server_config, self.bind_addr)?;
+        
+        let endpoint = if let Some(socket) = self.prebound_socket.take() {
+            // 기존 소켓 사용 (STUN 바인딩 된 소켓)
+            Endpoint::new(
+                quinn::EndpointConfig::default(),
+                Some(server_config),
+                socket,
+                std::sync::Arc::new(quinn::TokioRuntime),
+            )?
+        } else {
+            // 새 소켓 바인딩
+            Endpoint::server(server_config, self.bind_addr)?
+        };
         
         info!("🚀 QUIC 서버 시작: {}", self.bind_addr);
         

@@ -61,9 +61,39 @@ class SignalingFactory {
       return 'native';
     }
 
+    // 🚨 [FIX] Rust WebSocket 서버가 실행 중인지 확인 후 사용
     if (USE_RUST_SIGNALING) {
-      console.log('[SignalingFactory] 🦀 Rust WebSocket 시그널링 사용');
-      return 'rust';
+      try {
+        // Rust WebSocket 서버 연결 가능성 테스트
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+        const response = await fetch(
+          RUST_SIGNALING_URL.replace('/ws', '/http'),
+          {
+            method: 'GET',
+            signal: controller.signal,
+          }
+        ).catch(() => null);
+
+        clearTimeout(timeoutId);
+
+        if (response && response.ok) {
+          console.log(
+            '[SignalingFactory] 🦀 Rust WebSocket 시그널링 사용 (서버 확인됨)'
+          );
+          return 'rust';
+        } else {
+          console.warn(
+            '[SignalingFactory] ⚠️ Rust WebSocket 서버 응답 없음, Socket.io로 폴백'
+          );
+        }
+      } catch (error) {
+        console.warn(
+          '[SignalingFactory] ⚠️ Rust WebSocket 서버 접속 실패, Socket.io로 폴백:',
+          error
+        );
+      }
     }
 
     console.log('[SignalingFactory] 🌐 Socket.io 시그널링 사용');

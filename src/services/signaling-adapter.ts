@@ -330,12 +330,29 @@ class RustSignalingAdapter {
     });
   }
 
+  // [기존 requestTurnConfig 제거 후 아래 코드로 교체]
   async requestTurnConfig(roomId: string): Promise<TurnConfigResponse> {
     return new Promise(resolve => {
+      // 1. 3초 타임아웃 설정 (서버 응답 지연 대비)
+      const timeout = setTimeout(() => {
+        console.warn(
+          '[RustSignaling] ⚠️ TURN config request timed out, defaulting to STUN'
+        );
+        resolve({ success: false });
+      }, 3000);
+
+      // 2. 응답 핸들러
       const handler = (data: unknown) => {
-        this.off('turn-config', handler);
-        resolve(data as TurnConfigResponse);
+        clearTimeout(timeout);
+        this.off('turn-config', handler); // 리스너 해제
+
+        // 데이터 구조 보정 (Rust snake_case -> JS camelCase 확인)
+        const response = data as TurnConfigResponse;
+        console.log('[RustSignaling] ✅ Received TURN config:', response);
+        resolve(response);
       };
+
+      // 3. 리스너 등록 및 요청 전송
       this.on('turn-config', handler);
       this.send('RequestTurnConfig', { roomId });
     });

@@ -49,7 +49,7 @@ class ReceiverService {
 
   // 파일 쓰기
   private writer: IFileWriter | null = null;
-  
+
   // 🚀 [Backpressure] TransferController
   private transferController: TransferController | null = null;
 
@@ -207,7 +207,10 @@ class ReceiverService {
   /**
    * 🚀 [Backpressure] TransferController 설정 (Writer 대신 사용)
    */
-  public async setTransferController(fileName: string, fileSize: number): Promise<void> {
+  public async setTransferController(
+    fileName: string,
+    fileSize: number
+  ): Promise<void> {
     if (!this.peer) {
       throw new Error('Peer not connected');
     }
@@ -226,24 +229,28 @@ class ReceiverService {
       this.emit('progress', {
         progress,
         speed,
-        bytesTransferred: this.transferController?.getStatus().totalProcessed || 0,
-        totalBytes: fileSize
+        bytesTransferred:
+          this.transferController?.getStatus().totalProcessed || 0,
+        totalBytes: fileSize,
       });
     });
 
-    this.transferController.onComplete((totalBytes) => {
+    this.transferController.onComplete(totalBytes => {
       this.emit('complete', { actualSize: totalBytes });
       this.notifyDownloadComplete();
     });
 
-    this.transferController.onError((error) => {
+    this.transferController.onError(error => {
       this.emit('error', error);
     });
 
     // 수신 시작
     await this.transferController.startReceiving(fileName, fileSize);
 
-    logInfo('[Receiver]', `TransferController set up for ${fileName} (${fileSize} bytes)`);
+    logInfo(
+      '[Receiver]',
+      `TransferController set up for ${fileName} (${fileSize} bytes)`
+    );
   }
 
   /**
@@ -311,14 +318,31 @@ class ReceiverService {
 
   private async fetchTurnConfig(roomId: string) {
     try {
-      const response = (await signalingService.requestTurnConfig(
-        roomId
-      )) as TurnConfigResponse;
-      if (response?.success && response?.data) {
-        this.iceServers = response.data.iceServers;
+      console.log(
+        '[Receiver] 🔄 Fetching TURN config from Signaling Server...'
+      );
+      // Signaling Adapter 호출
+      const response = await signalingService.requestTurnConfig(roomId);
+
+      if (response && response.success && response.data) {
+        // 데이터 구조 매핑 (response.data.iceServers가 배열인지 확인)
+        const servers =
+          response.data.iceServers || (response.data as any).ice_servers;
+
+        if (Array.isArray(servers) && servers.length > 0) {
+          this.iceServers = servers;
+          console.log(
+            '[Receiver] 🚀 Applied TURN Servers for WAN:',
+            this.iceServers
+          );
+        }
+      } else {
+        console.warn(
+          '[Receiver] ⚠️ TURN config empty/failed, using default STUN.'
+        );
       }
-    } catch (error) {
-      // 실패 시 기본 STUN 사용
+    } catch (e) {
+      console.warn('[Receiver] ⚠️ Failed to fetch TURN config:', e);
     }
   }
 

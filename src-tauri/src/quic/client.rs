@@ -6,29 +6,23 @@ use tracing::info;
 
 use crate::protocol::Command;
 
+#[derive(Clone)]
 pub struct QuicClient {
-    endpoint: Option<Endpoint>,
+    endpoint: Endpoint,
 }
 
 impl QuicClient {
-    pub fn new() -> Self {
-        Self { endpoint: None }
+    pub fn new() -> Result<Self> {
+        let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
+        let client_config = Self::configure_client()?;
+        endpoint.set_default_client_config(client_config);
+        Ok(Self { endpoint })
     }
     
-    pub async fn connect(&mut self, server_addr: SocketAddr, server_name: &str) -> Result<quinn::Connection> {
-        let client_config = self.configure_client()?;
-        
-        let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
-        endpoint.set_default_client_config(client_config);
-        
+    pub async fn connect(&self, server_addr: SocketAddr, server_name: &str) -> Result<quinn::Connection> {
         info!("QUIC 연결 시도: {}", server_addr);
-        
-        let conn = endpoint.connect(server_addr, server_name)?.await?;
-        
+        let conn = self.endpoint.connect(server_addr, server_name)?.await?;
         info!("✅ QUIC 연결 성공: {}", server_addr);
-        
-        self.endpoint = Some(endpoint);
-        
         Ok(conn)
     }
     
@@ -52,7 +46,7 @@ impl QuicClient {
         }
     }
     
-    fn configure_client(&self) -> Result<ClientConfig> {
+    fn configure_client() -> Result<ClientConfig> {
         let mut client_crypto = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
@@ -85,19 +79,13 @@ impl QuicClient {
         Ok(client_config)
     }
     
-    pub fn disconnect(&mut self) {
-        if let Some(endpoint) = self.endpoint.take() {
-            endpoint.close(0u32.into(), b"disconnect");
-            info!("QUIC 클라이언트 연결 해제");
-        }
+    pub fn disconnect(&self) {
+        self.endpoint.close(0u32.into(), b"disconnect");
+        info!("QUIC 클라이언트 연결 해제");
     }
 }
 
-impl Default for QuicClient {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+
 
 #[derive(Debug)]
 struct SkipServerVerification;

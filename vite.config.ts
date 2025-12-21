@@ -21,7 +21,7 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5173,
       strictPort: true,
-      host: host || false,
+      host: host || 'localhost',
       hmr: host
         ? {
             protocol: 'ws',
@@ -48,7 +48,7 @@ export default defineConfig(({ mode }) => {
       cssCodeSplit: true,
       sourcemap: !isProduction, // 프로덕션에서는 소스맵 제거
       chunkSizeWarningLimit: 1000, // 1MB까지 경고 무시 (Three.js가 큼)
-      
+
       rollupOptions: {
         input: {
           main: path.resolve(__dirname, 'index.html'),
@@ -62,15 +62,27 @@ export default defineConfig(({ mode }) => {
                 return 'vendor-visualizer';
               }
               // 2. React 핵심 코어
-              if (id.includes('react') || id.includes('react-dom') || id.includes('scheduler')) {
+              if (
+                id.includes('react') ||
+                id.includes('react-dom') ||
+                id.includes('scheduler')
+              ) {
                 return 'vendor-react';
               }
               // 3. P2P 네트워크 및 파일 처리
-              if (id.includes('simple-peer') || id.includes('streamsaver') || id.includes('fflate')) {
+              if (
+                id.includes('simple-peer') ||
+                id.includes('streamsaver') ||
+                id.includes('fflate')
+              ) {
                 return 'vendor-network';
               }
               // 4. 유틸리티 및 상태 관리
-              if (id.includes('zustand') || id.includes('framer-motion') || id.includes('lucide-react')) {
+              if (
+                id.includes('zustand') ||
+                id.includes('framer-motion') ||
+                id.includes('lucide-react')
+              ) {
                 return 'vendor-utils';
               }
               // 나머지는 vendor-common으로 번들링
@@ -162,7 +174,7 @@ export default defineConfig(({ mode }) => {
         '@react-three/fiber',
         'simple-peer',
         'buffer',
-        'process'
+        'process',
       ],
       exclude: ['pons-core-wasm'],
       esbuildOptions: {

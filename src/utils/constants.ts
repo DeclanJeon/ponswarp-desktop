@@ -1,10 +1,15 @@
 export const APP_NAME = 'PonsWarp';
-export const SIGNALING_SERVER_URL = import.meta.env.VITE_SIGNALING_SERVER_URL;
 
-// Rust 시그널링 서버 설정
-export const USE_RUST_SIGNALING =
-  import.meta.env.VITE_USE_RUST_SIGNALING === 'true';
-export const RUST_SIGNALING_URL = import.meta.env.VITE_RUST_SIGNALING_URL;
+// [수정] 환경 변수를 최우선으로 로드하고, 없을 경우 로컬 사용
+export const SIGNALING_SERVER_URL =
+  import.meta.env.VITE_SIGNALING_SERVER_URL || 'http://localhost:5502';
+
+// [수정] Rust Signaling URL 설정 (배포된 WSS 주소)
+export const RUST_SIGNALING_URL =
+  import.meta.env.VITE_RUST_SIGNALING_URL || 'ws://localhost:5502/ws';
+
+// [수정] Rust 시그널링 사용 활성화
+export const USE_RUST_SIGNALING = true;
 
 // 🚀 청크 사이징 (128KB 브라우저 제한)
 export const CHUNK_SIZE_MIN = 16 * 1024; // 16KB

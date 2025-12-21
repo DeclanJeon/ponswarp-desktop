@@ -9,7 +9,8 @@ mod bootstrap;
 use std::sync::Arc;
 use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::RwLock;
+use std::collections::HashMap;
+use tokio::sync::{RwLock, Mutex};
 use tracing::info;
 use tauri::{AppHandle, Manager, Emitter};
 use protocol::Command;
@@ -41,6 +42,8 @@ pub struct AppState {
     accepted_connections: Arc<RwLock<std::collections::HashMap<String, quinn::Connection>>>,
     // 🆕 내장 부트스트랩 서비스
     embedded_bootstrap: Arc<RwLock<Option<EmbeddedBootstrapService>>>,
+    // 🆕 활성 파일 스트림 (StreamSaver 대체용)
+    active_file_streams: Arc<RwLock<HashMap<String, (Arc<Mutex<tokio::fs::File>>, String)>>>,
     // 🆕 Tauri AppHandle 추가
     pub app_handle: AppHandle,
     // 🆕 앱 종료 진행 중 플래그
@@ -79,6 +82,151 @@ fn get_ip_via_udp_probe() -> Option<IpAddr> {
     socket.connect("1.1.1.1:80").ok()?;
     let ip = socket.local_addr().ok()?.ip();
     if ip.is_loopback() { None } else { Some(ip) }
+}
+
+// 🆕 STUN 구현을 위한 간단한 헬퍼
+async fn get_public_addr_via_stun(socket: &tokio::net::UdpSocket) -> Result<SocketAddr, String> {
+    // Simple STUN Binding Request
+    let mut buf = vec![0u8; 20];
+    // Message Type: 0x0001 (Binding Request)
+    buf[0] = 0x00; buf[1] = 0x01;
+    // Message Length: 0x0000
+    buf[2] = 0x00; buf[3] = 0x00;
+    // Magic Cookie: 0x2112A442
+    buf[4] = 0x21; buf[5] = 0x12; buf[6] = 0xA4; buf[7] = 0x42;
+    // Transaction ID: Random 12 bytes
+    use rand::RngCore;
+    rand::thread_rng().fill_bytes(&mut buf[8..20]);
+    
+    // Google STUN server
+    let stun_server = "stun.l.google.com:19302";
+    socket.send_to(&buf, stun_server).await.map_err(|e| e.to_string())?;
+    
+    let mut recv_buf = vec![0u8; 1024];
+    let (len, _addr) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        socket.recv_from(&mut recv_buf)
+    ).await
+    .map_err(|_| "STUN timeout".to_string())?
+    .map_err(|e| e.to_string())?;
+    
+    // Parse response for XOR-MAPPED-ADDRESS (0x0020)
+    let mut idx = 20;
+    while idx + 4 <= len {
+        let attr_type = ((recv_buf[idx] as u16) << 8) | (recv_buf[idx+1] as u16);
+        let attr_len = ((recv_buf[idx+2] as u16) << 8) | (recv_buf[idx+3] as u16);
+        idx += 4;
+        
+        if idx + (attr_len as usize) > len { break; }
+        
+        if attr_type == 0x0020 { // XOR-MAPPED-ADDRESS
+            // Family(1), Port(2), Address(4)
+            let family = recv_buf[idx+1];
+            let port_xor = ((recv_buf[idx+2] as u16) << 8) | (recv_buf[idx+3] as u16);
+            let port = port_xor ^ 0x2112; // Magic cookie high 16 bits
+            
+            if family == 0x01 { // IPv4
+               let ip_xor_bytes = &recv_buf[idx+4..idx+8];
+               let magic_bytes = [0x21, 0x12, 0xA4, 0x42];
+               let mut ip_bytes = [0u8; 4];
+               for i in 0..4 { ip_bytes[i] = ip_xor_bytes[i] ^ magic_bytes[i]; }
+               return Ok(SocketAddr::new(IpAddr::from(ip_bytes), port));
+            }
+        }
+        
+        idx += attr_len as usize;
+        // Padding
+        let padding = (4 - (attr_len % 4)) % 4;
+        idx += padding as usize;
+    }
+
+    Err("STUN Address not found in response".to_string())
+}
+
+#[tauri::command]
+async fn start_quic_server_wan(
+    port: u16,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    // 1. UDP 소켓 바인딩 (Quinn에 넘기기 전 STUN 용도로 사용)
+    let socket = std::net::UdpSocket::bind(format!("0.0.0.0:{}", port))
+        .map_err(|e| format!("UDP 바인딩 실패: {}", e))?;
+    socket.set_nonblocking(true).map_err(|e| e.to_string())?;
+    
+    let local_socket_addr = socket.local_addr().map_err(|e| e.to_string())?;
+
+    // 2. Tokio 소켓으로 변환하여 STUN 수행
+    let tokio_socket = tokio::net::UdpSocket::from_std(socket)
+        .map_err(|e| format!("Tokio 소켓 변환 실패: {}", e))?;
+    
+    let public_addr_res = get_public_addr_via_stun(&tokio_socket).await;
+    
+    // 3. 다시 std 소켓으로 변환
+    let socket = tokio_socket.into_std()
+        .map_err(|e| format!("Std 소켓 변환 실패: {}", e))?;
+        
+    // 4. QuicServer 생성 (기존 소켓 재사용)
+    let mut server = QuicServer::new_with_socket(socket)
+        .map_err(|e| format!("QUIC 서버 생성 실패: {}", e))?;
+
+    server.start().await.map_err(|e| format!("QUIC 서버 시작 실패: {}", e))?;
+    let local_addr = server.local_addr().unwrap_or(local_socket_addr);
+
+    // 5. 연결 정보 구성
+    let connectable_ip = if local_addr.ip().is_unspecified() {
+        get_ip_via_udp_probe().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+    } else {
+        local_addr.ip()
+    };
+    
+    let host_addr_str = SocketAddr::new(connectable_ip, local_addr.port()).to_string();
+    
+    // Candidate 목록 생성
+    let mut candidates = vec![
+        serde_json::json!({ "type": "host", "ip": connectable_ip.to_string(), "port": local_addr.port() })
+    ];
+    
+    if let Ok(pub_addr) = public_addr_res {
+        info!("🌍 STUN 성공: Public IP = {}", pub_addr);
+        if pub_addr != local_addr {
+             candidates.push(serde_json::json!({
+                 "type": "srflx",
+                 "ip": pub_addr.ip().to_string(),
+                 "port": pub_addr.port()
+            }));
+        }
+    } else {
+        info!("⚠️ STUN 실패: {}", public_addr_res.err().unwrap());
+    }
+
+    // 🆕 연결 수신 핸들러 (기존 start_quic_server와 동일)
+    if let Some(mut conn_rx) = server.take_connection_receiver() {
+        let app_handle = state.app_handle.clone();
+        let accepted_conns = state.accepted_connections.clone();
+        
+        tauri::async_runtime::spawn(async move {
+            while let Some(accepted) = conn_rx.recv().await {
+                let peer_id = accepted.peer_addr.to_string();
+                info!("📥 Receiver 연결됨 (WAN): {}", peer_id);
+                accepted_conns.write().await.insert(peer_id.clone(), accepted.connection);
+                
+                let _ = app_handle.emit("quic-peer-connected", serde_json::json!({
+                    "peerId": peer_id,
+                    "peerAddr": accepted.peer_addr.to_string(),
+                    "wan": true
+                }));
+            }
+        });
+    }
+
+    *state.quic_server.write().await = Some(server);
+    
+    info!("QUIC 서버(WAN) 시작됨. Candidates: {:?}", candidates);
+    
+    Ok(serde_json::json!({
+        "quicAddress": host_addr_str,
+        "quicCandidates": candidates
+    }))
 }
 
 #[tauri::command]
@@ -291,62 +439,108 @@ async fn connect_to_peer(
     let peer_addr: SocketAddr = peer_address.parse()
         .map_err(|e| format!("주소 파싱 실패: {}", e))?;
     
-    let mut client = state.quic_client.write().await;
-    if client.is_none() {
-        *client = Some(QuicClient::new());
+    // Client 초기화 및 취득 (Lock 최소화)
+    let client = {
+        let mut guard = state.quic_client.write().await;
+        if guard.is_none() {
+            *guard = Some(QuicClient::new().map_err(|e| format!("QUIC 클라이언트 생성 실패: {}", e))?);
+        }
+        guard.as_ref().unwrap().clone()
+    };
+    
+    // 연결 시도 (Lock 없이 수행)
+    let conn = client.connect(peer_addr, &peer_id).await
+        .map_err(|e| format!("QUIC 연결 실패: {}", e))?;
+        
+    // 연결 저장
+    state.active_connections.write().await.insert(peer_id.clone(), conn);
+    
+    info!("✅ 피어 연결 성공: {} @ {}", peer_id, peer_address);
+    Ok(true)
+}
+
+/// 🆕 여러 Candidate 주소로 동시에 연결 시도 (WAN/ICE 지원)
+#[tauri::command]
+async fn connect_to_peer_race(
+    peer_id: String,
+    addresses: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> { // 성공한 주소 반환
+    use futures::future::select_ok;
+    
+    let peer_addrs: Vec<SocketAddr> = addresses.iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+        
+    if peer_addrs.is_empty() {
+        return Err("유효한 주소가 없습니다.".to_string());
     }
     
-    if let Some(ref mut c) = *client {
-        let conn = c.connect(peer_addr, &peer_id).await
-            .map_err(|e| format!("QUIC 연결 실패: {}", e))?;
-        
-        // 연결 저장
-        state.active_connections.write().await.insert(peer_id.clone(), conn);
-        
-        info!("✅ 피어 연결 성공: {} @ {}", peer_id, peer_address);
-        Ok(true)
-    } else {
-        Err("QUIC 클라이언트 초기화 실패".to_string())
+    info!("🏎️ 연결 레이스 시작: {} -> {:?}", peer_id, peer_addrs);
+    
+    let client = {
+        let mut guard = state.quic_client.write().await;
+        if guard.is_none() {
+            *guard = Some(QuicClient::new().map_err(|e| format!("QUIC 클라이언트 생성 실패: {}", e))?);
+        }
+        guard.as_ref().unwrap().clone()
+    };
+    
+    let futures = peer_addrs.into_iter().map(|addr| {
+        let client = client.clone();
+        let pid = peer_id.clone();
+        Box::pin(async move {
+            client.connect(addr, &pid).await.map(|conn| (conn, addr))
+        })
+    });
+    
+    match select_ok(futures).await {
+        Ok(((conn, addr), _)) => {
+            info!("🏆 연결 레이스 승리: {} @ {}", peer_id, addr);
+            state.active_connections.write().await.insert(peer_id.clone(), conn);
+            Ok(addr.to_string())
+        },
+        Err(e) => {
+            let msg = format!("모든 연결 시도 실패: {}", e);
+            tracing::error!("{}", msg);
+            Err(msg)
+        }
     }
 }
 
-/// QUIC을 통해 파일 전송 시작 (Sender - 클라이언트로 연결한 경우)
+/// QUIC을 통해 파일/폴더 전송 시작 (Sender - 클라이언트로 연결한 경우)
 #[tauri::command]
-async fn send_file_to_peer(
+async fn send_files_to_peer(
     peer_id: String,
-    file_path: String,
+    file_paths: Vec<String>,
     job_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<u64, String> {
-    // 1. Scope를 제한하여 Lock 시간을 최소화하고 Connection을 복제(Clone)합니다.
     let conn = {
         let connections = state.active_connections.read().await;
         connections
             .get(&peer_id)
             .ok_or_else(|| format!("피어 {}에 대한 연결이 없습니다.", peer_id))?
-            .clone() // Quinn Connection은 내부적으로 Arc이므로 Clone 가능
-    }; // 여기서 read lock이 해제됩니다.
+            .clone()
+    };
 
-    info!("📤 전송 시작: {} -> {}", file_path, peer_id);
+    info!("📤 전송 시작 (Client): {:?} -> {}", file_paths, peer_id);
 
-    // 2. 별도의 채널 생성
     let (tx, mut rx) = mpsc::channel::<TransferProgress>(100);
-    let mut engine = FileTransferEngine::new();
-    engine.set_progress_channel(tx);
+    let engine = FileTransferEngine::new();
+    let mut engine_mut = FileTransferEngine::new();
+    engine_mut.set_progress_channel(tx);
+    let engine = Arc::new(engine_mut);
 
     let app_handle = state.app_handle.clone();
-    
-    // 3. 비동기 작업 수행 (Lock 없는 상태)
     tauri::async_runtime::spawn(async move {
         while let Some(progress) = rx.recv().await {
             let _ = app_handle.emit("transfer-progress", &progress);
         }
     });
 
-    let path = PathBuf::from(&file_path);
-    
-    // conn을 소유권 이동으로 넘겨도 원본 HashMap에는 영향 없음 (Clone 했으므로)
-    let bytes_sent = engine.send_file(&conn, path, &job_id).await
+    let paths: Vec<PathBuf> = file_paths.iter().map(PathBuf::from).collect();
+    let bytes_sent = engine.send_files(&conn, paths, &job_id).await
         .map_err(|e| format!("파일 전송 실패: {}", e))?;
 
     let _ = state.app_handle.emit("transfer-complete", serde_json::json!({
@@ -355,47 +549,42 @@ async fn send_file_to_peer(
         "peerId": peer_id,
     }));
 
-    info!("✅ 파일 전송 완료: {} bytes to {}", bytes_sent, peer_id);
+    info!("✅ 전송 완료: {} bytes to {}", bytes_sent, peer_id);
     Ok(bytes_sent)
 }
 
-/// 🆕 서버에서 수락한 연결로 파일 전송 (Sender - 서버 역할)
+/// 🆕 서버에서 수락한 연결로 파일/폴더 전송 (Sender - 서버 역할)
 #[tauri::command]
-async fn send_file_to_accepted_peer(
+async fn send_files_to_accepted_peer(
     peer_id: String,
-    file_path: String,
+    file_paths: Vec<String>,
     job_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<u64, String> {
-    // 1. Scope를 제한하여 Lock 시간을 최소화하고 Connection을 복제(Clone)합니다.
     let conn = {
         let connections = state.accepted_connections.read().await;
         connections
             .get(&peer_id)
             .ok_or_else(|| format!("수락된 피어 {}에 대한 연결이 없습니다.", peer_id))?
-            .clone() // Quinn Connection은 내부적으로 Arc이므로 Clone 가능
-    }; // 여기서 read lock이 해제됩니다.
+            .clone()
+    };
 
-    info!("📤 전송 시작: {} -> {}", file_path, peer_id);
+    info!("📤 전송 시작 (Server): {:?} -> {}", file_paths, peer_id);
 
-    // 2. 별도의 채널 생성
     let (tx, mut rx) = mpsc::channel::<TransferProgress>(100);
-    let mut engine = FileTransferEngine::new();
-    engine.set_progress_channel(tx);
+    let mut engine_mut = FileTransferEngine::new();
+    engine_mut.set_progress_channel(tx);
+    let engine = Arc::new(engine_mut);
 
     let app_handle = state.app_handle.clone();
-    
-    // 3. 비동기 작업 수행 (Lock 없는 상태)
     tauri::async_runtime::spawn(async move {
         while let Some(progress) = rx.recv().await {
             let _ = app_handle.emit("transfer-progress", &progress);
         }
     });
 
-    let path = PathBuf::from(&file_path);
-    
-    // conn을 소유권 이동으로 넘겨도 원본 HashMap에는 영향 없음 (Clone 했으므로)
-    let bytes_sent = engine.send_file(&conn, path, &job_id).await
+    let paths: Vec<PathBuf> = file_paths.iter().map(PathBuf::from).collect();
+    let bytes_sent = engine.send_files(&conn, paths, &job_id).await
         .map_err(|e| format!("파일 전송 실패: {}", e))?;
 
     let _ = state.app_handle.emit("transfer-complete", serde_json::json!({
@@ -404,7 +593,7 @@ async fn send_file_to_accepted_peer(
         "peerId": peer_id,
     }));
 
-    info!("✅ 파일 전송 완료: {} bytes to {}", bytes_sent, peer_id);
+    info!("✅ 전송 완료: {} bytes to {}", bytes_sent, peer_id);
     Ok(bytes_sent)
 }
 
@@ -904,22 +1093,42 @@ async fn start_file_stream(
     total_size: Option<u64>,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use tokio::fs;
 
-    // 파일 상태 관리를 위한 전역 상태 추가
-    struct FileStreamingState {
-        active_writers: HashMap<String, std::fs::File>,
+    let path = PathBuf::from(&save_path);
+    
+    // 부모 디렉토리 생성
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await
+            .map_err(|e| format!("디렉토리 생성 실패: {}", e))?;
     }
 
-    // AppState에 스트리밍 상태 추가 (기존 코드와 호환성 유지)
-    let file = std::fs::File::create(&save_path)
+    let file = tokio::fs::File::create(&path).await
         .map_err(|e| format!("파일 생성 실패: {}", e))?;
 
-    info!("📝 파일 스트리밍 시작: {} -> {}", file_id, save_path);
+    // 파일 크기 미리 할당 (성능 최적화 및 단편화 방지)
+    if let Some(size) = total_size {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = file.as_raw_fd();
+            unsafe {
+                libc::posix_fallocate(fd, 0, size as i64);
+            }
+        }
+        #[cfg(windows)]
+        {
+            file.set_len(size).await.map_err(|e| e.to_string())?;
+        }
+    }
 
-    // 실제 구현에서는 상태를 AppState에 저장해야 함
-    // 여기서는 간단히 로그만 남김
+    let mut writers = state.active_file_streams.write().await;
+    writers.insert(file_id.clone(), (Arc::new(Mutex::new(file)), save_path.clone()));
+
+    info!("📝 파일 스트리밍 시작: {} -> {}", file_id, save_path);
     Ok(())
 }
 
@@ -929,30 +1138,25 @@ async fn write_file_chunk(
     file_id: String,
     chunk: Vec<u8>,
     offset: Option<u64>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    use std::fs::{File, OpenOptions};
-    use std::io::{Seek, SeekFrom, Write};
+    use tokio::io::{AsyncSeekExt, SeekFrom, AsyncWriteExt};
 
-    // 실제 구현에서는 파일 핸들을 상태에서 관리해야 함
-    // 여기서는 간단한 예제 구현
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(&format!("/tmp/ponswarp_{}", file_id))
-        .map_err(|e| format!("파일 열기 실패: {}", e))?;
+    let writers = state.active_file_streams.read().await;
+    let (file_mutex, _) = writers.get(&file_id)
+        .ok_or_else(|| format!("활성 스트림을 찾을 수 없습니다: {}", file_id))?;
+    
+    let mut file = file_mutex.lock().await;
 
     // 오프셋이 지정된 경우 해당 위치로 이동
     if let Some(off) = offset {
-        file.seek(SeekFrom::Start(off))
+        file.seek(SeekFrom::Start(off)).await
             .map_err(|e| format!("파일 위치 이동 실패: {}", e))?;
     }
 
     // 청크 쓰기
-    file.write_all(&chunk)
+    file.write_all(&chunk).await
         .map_err(|e| format!("청크 쓰기 실패: {}", e))?;
-
-    file.sync_all()
-        .map_err(|e| format!("디스크 동기화 실패: {}", e))?;
 
     Ok(())
 }
@@ -961,19 +1165,21 @@ async fn write_file_chunk(
 #[tauri::command]
 async fn complete_file_stream(
     file_id: String,
-    final_size: Option<u64>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    info!("✅ 파일 스트리밍 완료: {} (size: {:?})", file_id, final_size);
+    let mut writers = state.active_file_streams.write().await;
+    let (file_mutex, path) = writers.remove(&file_id)
+        .ok_or_else(|| format!("활성 스트림을 찾을 수 없습니다: {}", file_id))?;
+    
+    let mut file = file_mutex.lock().await;
 
-    let final_path = format!("/tmp/ponswarp_completed_{}", file_id);
+    // 디스크 동기화
+    use tokio::io::AsyncWriteExt;
+    file.flush().await.map_err(|e| format!("플러시 실패: {}", e))?;
+    file.sync_all().await.map_err(|e| format!("동기화 실패: {}", e))?;
 
-    // 실제 구에서는 임시 파일을 최종 위치로 이동
-    std::fs::rename(
-        format!("/tmp/ponswarp_{}", file_id),
-        &final_path
-    ).map_err(|e| format!("파일 이동 실패: {}", e))?;
-
-    Ok(final_path)
+    info!("✅ 파일 스트리밍 완료: {} -> {}", file_id, path);
+    Ok(path)
 }
 
 /// 🆕 스트리밍 파일 생성 (Native 다이얼로그 연동)
@@ -1048,34 +1254,36 @@ async fn send_signaling_message(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     let discovery = state.discovery.read().await;
-    let mut client = state.quic_client.write().await;
 
-    if let Some(ref disc) = *discovery {
+    // Discovery 서비스에서 피어 주소 조회
+    let peer_addr = if let Some(ref disc) = *discovery {
         if let Some(peer_info) = disc.get_peers().iter().find(|p| p.id == peer_id) {
-            let peer_addr = peer_info.address;
-
-            if client.is_none() {
-                *client = Some(QuicClient::new());
-            }
-            
-            if let Some(ref mut c) = *client {
-                let conn = c.connect(peer_addr, &peer_id).await
-                    .map_err(|e| format!("QUIC 연결 실패: {}", e))?;
-                
-                c.send_command(&conn, message).await
-                    .map_err(|e| format!("시그널링 메시지 전송 실패: {}", e))?;
-                
-                info!("✅ 시그널링 메시지를 {}로 전송함", peer_id);
-                Ok(())
-            } else {
-                Err("QUIC 클라이언트를 초기화할 수 없음".to_string())
-            }
+            peer_info.address
         } else {
-            Err(format!("피어 {}를 찾을 수 없음", peer_id))
+            return Err(format!("피어 {}를 찾을 수 없음", peer_id));
         }
     } else {
-        Err("Discovery 서비스가 실행되고 있지 않음".to_string())
-    }
+        return Err("Discovery 서비스가 실행되고 있지 않음".to_string());
+    };
+
+    // Client 초기화 및 취득
+    let client = {
+        let mut guard = state.quic_client.write().await;
+        if guard.is_none() {
+            *guard = Some(QuicClient::new().map_err(|e| format!("QUIC 클라이언트 생성 실패: {}", e))?);
+        }
+        guard.as_ref().unwrap().clone()
+    };
+    
+    // 연결 및 메시지 전송
+    let conn = client.connect(peer_addr, &peer_id).await
+        .map_err(|e| format!("QUIC 연결 실패: {}", e))?;
+    
+    client.send_command(&conn, message).await
+        .map_err(|e| format!("시그널링 메시지 전송 실패: {}", e))?;
+    
+    info!("✅ 시그널링 메시지를 {}로 전송함", peer_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1336,6 +1544,7 @@ pub fn run() {
                 active_connections: Arc::new(RwLock::new(std::collections::HashMap::new())),
                 accepted_connections: Arc::new(RwLock::new(std::collections::HashMap::new())),
                 embedded_bootstrap: Arc::new(RwLock::new(None)),
+                active_file_streams: Arc::new(RwLock::new(std::collections::HashMap::new())),
                 app_handle: app_handle.clone(),
                 is_closing: Arc::new(AtomicBool::new(false)),
             };
@@ -1394,6 +1603,7 @@ pub fn run() {
             get_runtime_info,
             ping_quic,
             start_quic_server,
+            start_quic_server_wan, // 🆕 WAN 지원 서버 시작
             stop_quic_server,
             start_discovery,
             get_discovered_peers,
@@ -1407,8 +1617,9 @@ pub fn run() {
             handle_signaling_message,
             // 🆕 QUIC 파일 전송
             connect_to_peer,
-            send_file_to_peer,
-            send_file_to_accepted_peer,
+            connect_to_peer_race, // 🆕 Connection Racing (WAN/ICE)
+            send_files_to_peer,
+            send_files_to_accepted_peer,
             get_accepted_peers,
             receive_file_from_peer,
             disconnect_peer,

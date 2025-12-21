@@ -1297,11 +1297,18 @@ export class SwarmManager {
     this.completedPeerCount = 0;
     this.useParallelEncryption = useParallelEncryption;
 
-    // TURN 설정 가져오기
+    // 1. 시그널링 연결
+    await signalingService.connect();
+
+    // [STEP 2 - 추가] TURN 설정 가져오기 (Join 전 수행)
     await this.fetchTurnConfig(roomId);
 
-    // 시그널링 연결
-    await signalingService.connect();
+    // 3. 방 입장 (TURN 설정 완료 후 입장)
+    try {
+      await this.fetchTurnConfig(roomId);
+    } catch (e) {
+      console.warn('TURN fetch optional fail', e);
+    }
     await signalingService.joinRoom(roomId);
 
     if (useParallelEncryption) {
@@ -1723,16 +1730,34 @@ export class SwarmManager {
 
   // ======================= 유틸리티 =======================
 
+  // [추가] TURN 설정 가져오기 메서드 (클래스 내부에 추가)
   private async fetchTurnConfig(roomId: string): Promise<void> {
     try {
-      const response = (await signalingService.requestTurnConfig(
-        roomId
-      )) as any;
-      if (response?.success && response?.data) {
-        this.iceServers = response.data.iceServers;
+      console.log(
+        '[SwarmManager] 🔄 Fetching TURN config from Signaling Server...'
+      );
+      // Signaling Adapter 호출
+      const response = await signalingService.requestTurnConfig(roomId);
+
+      if (response && response.success && response.data) {
+        // 데이터 구조 매핑 (response.data.iceServers가 배열인지 확인)
+        const servers =
+          response.data.iceServers || (response.data as any).ice_servers;
+
+        if (Array.isArray(servers) && servers.length > 0) {
+          this.iceServers = servers;
+          console.log(
+            '[SwarmManager] 🚀 Applied TURN Servers for WAN:',
+            this.iceServers
+          );
+        }
+      } else {
+        console.warn(
+          '[SwarmManager] ⚠️ TURN config empty/failed, using default STUN.'
+        );
       }
-    } catch (error) {
-      logError('[SwarmManager]', 'Failed to fetch TURN config:', error);
+    } catch (e) {
+      console.warn('[SwarmManager] ⚠️ Failed to fetch TURN config:', e);
     }
   }
 

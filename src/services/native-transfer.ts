@@ -208,12 +208,21 @@ class NativeTransferService {
 
     // 🆕 QUIC 서버 시작 (Sender는 수신 대기)
     try {
-      const serverAddr = await invoke<string>('start_quic_server', { port: 0 });
+      // WAN 지원 서버 시작 및 Candidate 수집
+      const result = await invoke<{
+        quicAddress: string;
+        quicCandidates: Array<{ type: string; ip: string; port: number }>;
+      }>('start_quic_server_wan', { port: 0 });
+
+      const serverAddr = result.quicAddress;
+      const candidates = result.quicCandidates;
+
       logInfo('[NativeTransfer]', `QUIC 서버 시작됨: ${serverAddr}`);
+      logInfo('[NativeTransfer]', '수집된 Candidates:', candidates);
+
       this.localQuicAddress = serverAddr;
 
       // start_quic_server는 원격에서 접속 가능한 주소를 반환하도록 구현됨.
-      // 만약 구버전 백엔드가 0.0.0.0을 반환하면 그대로 두고 경고만 남김.
       const connectableAddr = serverAddr;
       if (serverAddr.startsWith('0.0.0.0:')) {
         logWarn(
@@ -222,13 +231,15 @@ class NativeTransferService {
         );
       }
 
-      // Manifest에 QUIC 주소 추가
+      // Manifest에 QUIC 주소 및 Candidate 추가
       if (manifest && typeof manifest === 'object') {
         const manifestObj = manifest as Record<string, unknown>;
         manifestObj.quicAddress = connectableAddr;
+        manifestObj.quicCandidates = candidates;
+
         logInfo(
           '[NativeTransfer]',
-          `Manifest에 QUIC 주소 추가: ${connectableAddr}`
+          `Manifest에 QUIC 주소 및 Candidate 추가 완료`
         );
       }
     } catch (e) {
@@ -276,7 +287,13 @@ class NativeTransferService {
 
     // 🆕 QUIC 서버 시작 (Receiver는 파일 수신 대기)
     try {
-      const serverAddr = await invoke<string>('start_quic_server', { port: 0 });
+      // WAN 지원 (STUN Binding) - Receiver도 Hole Punching을 위해 수행
+      const result = await invoke<{
+        quicAddress: string;
+        quicCandidates: Array<{ type: string; ip: string; port: number }>;
+      }>('start_quic_server_wan', { port: 0 });
+
+      const serverAddr = result.quicAddress;
       logInfo('[NativeTransfer]', `QUIC 서버 시작됨: ${serverAddr}`);
       this.localQuicAddress = serverAddr;
     } catch (e) {
@@ -358,20 +375,35 @@ class NativeTransferService {
       // 연결보다 UI 표시가 우선되어야 사용자가 "아, 뭔가 오고 있구나"를 알 수 있습니다.
       this.emit('metadata', manifest);
 
-      // 🆕 Sender의 QUIC 주소로 연결
-      const senderQuicAddress = (manifest as unknown as Record<string, unknown>)
-        ?.quicAddress;
+      // 🆕 Sender의 QUIC 주소 및 Candidate 가져오기
+      const manifestObj = manifest as unknown as Record<string, unknown>;
+      const senderQuicAddress = manifestObj?.quicAddress as string | undefined;
+      const candidates = manifestObj?.quicCandidates as
+        | Array<{ ip: string; port: number }>
+        | undefined;
+
+      // 연결 대상 주소 목록 구성
+      let targetAddresses: string[] = [];
+      if (Array.isArray(candidates) && candidates.length > 0) {
+        targetAddresses = candidates.map(c => `${c.ip}:${c.port}`);
+        // 레거시 주소도 포함 (중복 제거)
+        if (senderQuicAddress && !targetAddresses.includes(senderQuicAddress)) {
+          targetAddresses.push(senderQuicAddress);
+        }
+      } else if (senderQuicAddress) {
+        targetAddresses = [senderQuicAddress];
+      }
 
       // 다음 단계(Materialize)에서 재시도할 수 있도록 마지막 sender 정보 저장
       this.currentPeerId = senderId || this.currentPeerId;
-      if (typeof senderQuicAddress === 'string') {
-        this.lastSenderQuicAddress = senderQuicAddress;
+      if (targetAddresses.length > 0) {
+        this.lastSenderQuicAddress = targetAddresses[0]; // 대표 주소 저장
       }
 
-      if (senderQuicAddress && senderId) {
+      if (targetAddresses.length > 0 && senderId) {
         logInfo(
           '[NativeTransfer]',
-          `Sender 연결 시도: ${senderId} @ ${senderQuicAddress}`
+          `Sender 연결 시도 (Racing): ${senderId} @ ${targetAddresses.length} addrs`
         );
 
         // 🆕 [중요] 연결 시도 전 상태 초기화
@@ -379,10 +411,8 @@ class NativeTransferService {
         this.currentPeerId = senderId;
 
         // 연결은 비동기로 진행
-        const connected = await this.connectToPeer(
-          senderId,
-          senderQuicAddress as string
-        );
+        // 다중 주소(Racing) 또는 단일 주소 연결 지원
+        const connected = await this.connectToPeer(senderId, targetAddresses);
 
         if (!connected) {
           logError('[NativeTransfer]', '❌ Sender 연결 실패');
@@ -401,6 +431,7 @@ class NativeTransferService {
           {
             senderQuicAddress,
             senderId,
+            candidates,
             manifest,
           }
         );
@@ -485,16 +516,47 @@ class NativeTransferService {
   }
 
   /**
-   * 피어에 연결
+   * 피어에 연결 (단일 주소 또는 주소 목록 Racing)
    */
-  async connectToPeer(peerId: string, peerAddress: string): Promise<boolean> {
+  async connectToPeer(
+    peerId: string,
+    peerAddress: string | string[]
+  ): Promise<boolean> {
     try {
-      logInfo('[NativeTransfer]', `피어 연결 시도: ${peerId} @ ${peerAddress}`);
+      let result = false;
 
-      const result = await invoke<boolean>('connect_to_peer', {
-        peerId,
-        peerAddress,
-      });
+      if (Array.isArray(peerAddress)) {
+        // 🆕 Connection Racing
+        if (peerAddress.length === 0) return false;
+
+        logInfo(
+          '[NativeTransfer]',
+          `피어 연결 시도 (Race): ${peerId} over ${peerAddress.length} paths`
+        );
+        // connect_to_peer_race 명령 호출
+        // 성공 시 연결된 주소 반환, 실패 시 에러
+        try {
+          const connectedAddr = await invoke<string>('connect_to_peer_race', {
+            peerId,
+            addresses: peerAddress,
+          });
+          logInfo('[NativeTransfer]', `✅ Race 승리: ${connectedAddr}`);
+          result = true;
+        } catch (e) {
+          console.warn('Race 연결 실패:', e);
+          result = false;
+        }
+      } else {
+        // 기존 단일 연결
+        logInfo(
+          '[NativeTransfer]',
+          `피어 연결 시도: ${peerId} @ ${peerAddress}`
+        );
+        result = await invoke<boolean>('connect_to_peer', {
+          peerId,
+          peerAddress,
+        });
+      }
 
       if (result) {
         this.connected = true;
@@ -503,7 +565,6 @@ class NativeTransferService {
         logInfo('[NativeTransfer]', '✅ 피어 연결 성공');
 
         // 🆕 연결 상태 확인을 위한 추가 검증
-        // 실제 연결이 유효한지 확인하기 위해 간단한 ping 테스트
         try {
           const pingResult = await invoke<boolean>('ping_quic');
           if (pingResult) {
@@ -589,12 +650,11 @@ class NativeTransferService {
   }
 
   /**
-   * 🆕 수락된 피어에게 파일 전송 (Sender - 서버 역할)
-   * Receiver가 Sender의 QUIC 서버에 연결하면 이 메서드로 전송
+   * 🆕 수락된 피어에게 파일/폴더 목록 전송 (Sender 측)
    */
-  async sendFileToAcceptedPeer(
+  async sendFilesToAcceptedPeer(
     peerId: string,
-    filePath: string,
+    filePaths: string[],
     jobId: string
   ): Promise<number> {
     // 🚨 [수정] 전송 완료 상태 추적을 위한 플래그
@@ -605,13 +665,13 @@ class NativeTransferService {
     try {
       logInfo(
         '[NativeTransfer]',
-        `수락된 피어에게 파일 전송 시작: ${filePath} -> ${peerId}`
+        `수락된 피어에게 파일 전송 시작: ${filePaths.length}개 항목 -> ${peerId}`
       );
       this.emit('status', 'TRANSFERRING');
 
-      const bytesSent = await invoke<number>('send_file_to_accepted_peer', {
+      const bytesSent = await invoke<number>('send_files_to_accepted_peer', {
         peerId,
-        filePath,
+        filePaths,
         jobId,
       });
 
