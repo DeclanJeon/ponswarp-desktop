@@ -480,7 +480,8 @@ class NativeTransferService {
       '[NativeTransfer]',
       `✅✅✅ Receiver 전송 완료 확인 수신됨!!! from: ${payload?.from || 'unknown'}`
     );
-    logInfo('[NativeTransfer]', '📤 Sender UI에 완료 이벤트 전달 중...');
+    logInfo('[NativeTransfer]', '📡 커밋 메시지: 수신자 확인 신호 수신 완료');
+    logInfo('[NativeTransfer]', '� Sender UI에 완료 이벤트 전달 중...');
 
     // Sender UI에 완료 이벤트 전달
     this.emit('receiver-complete', { peerId: payload?.from });
@@ -665,10 +666,11 @@ class NativeTransferService {
     try {
       logInfo(
         '[NativeTransfer]',
-        `수락된 피어에게 파일 전송 시작: ${filePaths.length}개 항목 -> ${peerId}`
+        `🚀 Starting native transfer: ${filePaths.length} files -> ${peerId}`
       );
       this.emit('status', 'TRANSFERRING');
 
+      // Rust로 파일 전송 요청 (로컬에서 전송이 끝나면 await가 풀림)
       const bytesSent = await invoke<number>('send_files_to_accepted_peer', {
         peerId,
         filePaths,
@@ -677,8 +679,15 @@ class NativeTransferService {
 
       // 🚨 [수정] 전송 완료 플래그 설정
       isCompleted = true;
-      this.emit('status', 'COMPLETED');
-      logInfo('[NativeTransfer]', `전송 완료:`, { bytesSent, jobId, peerId });
+
+      // [변경] 즉시 'COMPLETED'를 emit하지 않습니다.
+      // 수신자가 파일을 다 쓰고 신호를 보낼 때까지 'REMOTE_PROCESSING' 상태로 대기합니다.
+      logInfo(
+        '[NativeTransfer]',
+        `📤 Local send complete. Waiting for receiver confirmation...`
+      );
+      this.emit('status', 'REMOTE_PROCESSING');
+
       return bytesSent;
     } catch (error) {
       const errorMessage =

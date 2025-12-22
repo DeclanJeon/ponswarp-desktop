@@ -88,16 +88,69 @@ const SenderView: React.FC<SenderViewProps> = () => {
         console.error('[SenderView] Native transfer init failed:', err);
       });
 
+      // 상태 변경을 추적하기 위해 ref 사용 (이벤트 리스너 내부에서 최신 상태 확인용)
+      const statusRef = {
+        current: status as
+          | 'IDLE'
+          | 'PREPARING'
+          | 'WAITING'
+          | 'CONNECTING'
+          | 'TRANSFERRING'
+          | 'REMOTE_PROCESSING'
+          | 'READY_FOR_NEXT'
+          | 'DONE',
+      };
+      const updateStatusRef = (
+        newStatus:
+          | 'IDLE'
+          | 'PREPARING'
+          | 'WAITING'
+          | 'CONNECTING'
+          | 'TRANSFERRING'
+          | 'REMOTE_PROCESSING'
+          | 'READY_FOR_NEXT'
+          | 'DONE'
+      ) => {
+        statusRef.current = newStatus;
+      };
+
       nativeTransferService.on('status', (s: any) => {
-        if (s === 'TRANSFERRING') setStatus('TRANSFERRING');
-        if (s === 'COMPLETED') setStatus('DONE');
-        if (s === 'ERROR') setStatus('IDLE');
+        console.log('[SenderView] Native status update:', s);
+
+        if (s === 'TRANSFERRING') {
+          setStatus('TRANSFERRING');
+          updateStatusRef('TRANSFERRING');
+        }
+
+        // [추가] 원격 처리 중 상태 수신
+        if (s === 'REMOTE_PROCESSING') {
+          setStatus('REMOTE_PROCESSING');
+          updateStatusRef('REMOTE_PROCESSING');
+        }
+
+        if (s === 'COMPLETED') {
+          setStatus('DONE');
+          updateStatusRef('DONE');
+        }
+        if (s === 'ERROR') {
+          setStatus('IDLE');
+          updateStatusRef('IDLE');
+        }
       });
 
       nativeTransferService.on('progress', (data: any) => {
-        // 🆕 진행률이 오면 TRANSFERRING 상태로 강제 전환
+        // 현재 상태가 이미 'REMOTE_PROCESSING'이나 'DONE'이라면
+        // 늦게 도착한 progress 이벤트로 인해 'TRANSFERRING'으로 되돌아가는 것을 방지
+        if (
+          statusRef.current === 'REMOTE_PROCESSING' ||
+          statusRef.current === 'DONE'
+        ) {
+          return;
+        }
+
         console.log('[SenderView] 📊 Progress event:', data);
         setStatus('TRANSFERRING');
+        updateStatusRef('TRANSFERRING');
         setProgressData({
           progress: data.progress || 0,
           speed: data.speed || 0,
@@ -109,6 +162,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
       nativeTransferService.on('complete', () => {
         console.log('[SenderView] ✅ Transfer complete event received');
         setStatus('DONE');
+        updateStatusRef('DONE');
       });
 
       // 🆕 Receiver가 파일 수신 완료 확인 (시그널링 서버 통해)
@@ -118,6 +172,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
           data?.peerId
         );
         setStatus('DONE');
+        updateStatusRef('DONE');
       });
 
       // 🚨 [수정] 오류 중복 발생 방지를 위한 상태 추적
@@ -585,28 +640,36 @@ const SenderView: React.FC<SenderViewProps> = () => {
     } else {
       // WebRTC 모드: 압축 로직 적용
       let processedFiles = scannedFiles;
-      
+
       // 폴더 구조이거나 파일이 여러 개이면 압축
-      const shouldCompress = scannedFiles.length > 1 || (scannedFiles.length > 0 && scannedFiles[0].path.includes('/'));
+      const shouldCompress =
+        scannedFiles.length > 1 ||
+        (scannedFiles.length > 0 && scannedFiles[0].path.includes('/'));
 
       if (shouldCompress) {
         setStatus('PREPARING');
         console.log('[SenderView] 📦 Compressing files...');
-        
+
         try {
           // 임시 Manifest 생성 (이름 추출용)
           const tempManifest = createManifest(scannedFiles).manifest;
           const rootName = tempManifest.rootName;
-          
+
           const zipFile = await compressFiles(scannedFiles, rootName);
-          console.log('[SenderView] ✅ Compression complete:', zipFile.name, zipFile.size);
-          
+          console.log(
+            '[SenderView] ✅ Compression complete:',
+            zipFile.name,
+            zipFile.size
+          );
+
           // 압축된 파일을 단일 항목으로 취급
-          processedFiles = [{
-            file: zipFile,
-            path: zipFile.name,
-            nativeSize: zipFile.size
-          }];
+          processedFiles = [
+            {
+              file: zipFile,
+              path: zipFile.name,
+              nativeSize: zipFile.size,
+            },
+          ];
         } catch (error) {
           console.error('[SenderView] ❌ Compression failed:', error);
           setStatus('IDLE');
@@ -630,7 +693,8 @@ const SenderView: React.FC<SenderViewProps> = () => {
     selectedFilesRef.current = files; // Native 모드용 파일 저장
 
     // 여러 파일이면 ZIP 압축 준비 중 표시 (이미 압축 완료했으므로 WAITING으로 직행하거나 짧게 표시)
-    if (files.length > 1) { // 압축 후에는 보통 1개지만, Native 모드 등 고려
+    if (files.length > 1) {
+      // 압축 후에는 보통 1개지만, Native 모드 등 고려
       setStatus('PREPARING');
     } else {
       setStatus('WAITING');
@@ -708,24 +772,24 @@ const SenderView: React.FC<SenderViewProps> = () => {
             className={`w-full max-w-2xl p-2 ${glassPanelClass}`}
           >
             {/* Drag & Drop Zone (Focal Point) */}
-              <div
-                onDragEnter={handleDragEnter}
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                // [수정] 클릭 시 Native 모드면 다이얼로그, 아니면 input 클릭
-                onClick={e => {
-                  // 이벤트 버블링 방지
-                  if (e.target !== e.currentTarget) return;
+            <div
+              onDragEnter={handleDragEnter}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              // [수정] 클릭 시 Native 모드면 다이얼로그, 아니면 input 클릭
+              onClick={e => {
+                // 이벤트 버블링 방지
+                if (e.target !== e.currentTarget) return;
 
-                  if (isNativeMode) {
-                    handleNativeFileSelect(false);
-                  } else {
-                    fileInputRef.current?.click();
-                  }
-                }}
-                className="border-2 border-dashed border-cyan-500/30 rounded-[1.8rem] py-8 px-4 md:py-16 md:px-10 flex flex-col items-center justify-center text-center transition-all hover:border-cyan-400/60 hover:bg-cyan-500/5 cursor-pointer"
-              >
+                if (isNativeMode) {
+                  handleNativeFileSelect(false);
+                } else {
+                  fileInputRef.current?.click();
+                }
+              }}
+              className="border-2 border-dashed border-cyan-500/30 rounded-[1.8rem] py-8 px-4 md:py-16 md:px-10 flex flex-col items-center justify-center text-center transition-all hover:border-cyan-400/60 hover:bg-cyan-500/5 cursor-pointer"
+            >
               <input
                 type="file"
                 className="hidden"
