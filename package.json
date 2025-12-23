@@ -1,7 +1,7 @@
 {
   "name": "ponswarp",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "scripts": {
     "build:wasm": "wasm-pack build ../pons-core-wasm --target web --out-dir lib/ponscorewasm --release",
