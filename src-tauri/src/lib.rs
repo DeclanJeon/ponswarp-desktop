@@ -6,6 +6,19 @@ mod relay;
 mod grid;
 mod bootstrap;
 
+// 파일 스트림 관리자 (다중 파일 지원)
+use transfer::file_transfer::FileStreamManager;
+
+// Warp Engine v2.0 파일 시스템 커맨드
+use transfer::file_transfer::{
+    resolve_path,
+    scan_folder,
+    ensure_dir_exists,
+    start_native_file_stream,
+    write_native_file_chunk,
+    close_native_file_stream,
+};
+
 use std::sync::Arc;
 use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,6 +48,8 @@ pub struct AppState {
     relay_engine: Arc<RwLock<Option<RelayEngine>>>,
     // 🆕 파일 전송 엔진
     file_transfer: Arc<RwLock<Option<FileTransferEngine>>>,
+    // 🆕 파일 스트림 관리자 (다중 파일 쓰기)
+    file_stream_manager: Arc<FileStreamManager>,
     // 🆕 활성 QUIC 연결 (피어 전송용)
     active_connections: Arc<RwLock<std::collections::HashMap<String, quinn::Connection>>>,
     // 🆕 서버에서 수락한 연결 (Sender용 - Receiver가 연결하면 여기에 저장)
@@ -572,25 +587,56 @@ async fn get_file_metadata(
     use std::fs;
     use std::path::Path;
     
+    info!("🔍 get_file_metadata called with path: {}", path);
+    
     let path = Path::new(&path);
     
-    let metadata = fs::metadata(path).map_err(|e| format!("메타데이터 조회 실패: {}", e))?;
+    // 경로 확인 로그
+    info!("🔍 Path exists: {:?}", path.exists());
+    info!("🔍 Path is_file: {:?}", path.is_file());
+    info!("🔍 Path absolute: {:?}", path.is_absolute());
+    
+    let metadata = fs::metadata(path)
+        .map_err(|e| {
+            info!("❌ 메타데이터 조회 실패: {} for path: {}", e, path.display());
+            format!("메타데이터 조회 실패: {}", e)
+        })?;
+    
+    let size = metadata.len();
+    info!("📊 File size: {} bytes", size);
     
     let modified = metadata.modified()
-        .map_err(|e| format!("수정 시간 조회 실패: {}", e))?
+        .map_err(|e| {
+            info!("❌ 수정 시간 조회 실패: {}", e);
+            format!("수정 시간 조회 실패: {}", e)
+        })?
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| format!("시간 변환 실패: {}", e))?
+        .map_err(|e| {
+            info!("❌ 시간 변환 실패: {}", e);
+            format!("시간 변환 실패: {}", e)
+        })?
         .as_millis();
     
-    Ok(serde_json::json!({
-        "size": metadata.len(),
+    let is_file = metadata.is_file();
+    let is_dir = metadata.is_dir();
+    
+    let file_name = path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+    
+    info!("📊 File metadata: size={}, is_file={}, is_dir={}, name={}", 
+        size, is_file, is_dir, file_name);
+    
+    let result = serde_json::json!({
+        "size": size,
         "modifiedAt": modified,
-        "isFile": metadata.is_file(),
-        "isDir": metadata.is_dir(),
-        "name": path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-    }))
+        "isFile": is_file,
+        "isDir": is_dir,
+        "name": file_name
+    });
+    
+    info!("📤 Returning JSON: {}", result);
+    Ok(result)
 }
 
 // --- 멀티스트림 고속 전송 Commands ---
@@ -1333,6 +1379,7 @@ pub fn run() {
                 udp_core: Arc::new(RwLock::new(None)),
                 relay_engine: Arc::new(RwLock::new(None)),
                 file_transfer: Arc::new(RwLock::new(None)),
+                file_stream_manager: Arc::new(FileStreamManager::new()),
                 active_connections: Arc::new(RwLock::new(std::collections::HashMap::new())),
                 accepted_connections: Arc::new(RwLock::new(std::collections::HashMap::new())),
                 embedded_bootstrap: Arc::new(RwLock::new(None)),
@@ -1393,6 +1440,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_runtime_info,
             ping_quic,
+            // 🆕 폴더 스캔 (Sender용 - Warp Engine v2.0)
+            scan_folder,
             start_quic_server,
             stop_quic_server,
             start_discovery,
@@ -1433,13 +1482,19 @@ pub fn run() {
             stop_embedded_bootstrap,
             get_embedded_bootstrap_status,
             update_bootstrap_config,
-            // 🆕 Native File Streaming (StreamSaver.js 대체)
+            // --- Native File Streaming (StreamSaver.js 대체) ---
             start_file_stream,
             write_file_chunk,
             complete_file_stream,
             create_save_dialog,
             select_save_directory,
             check_storage_space,
+            // --- Warp Engine v2.0 파일 시스템 커맨드 ---
+            resolve_path,
+            ensure_dir_exists,
+            start_native_file_stream,
+            write_native_file_chunk,
+            close_native_file_stream,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

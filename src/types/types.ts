@@ -26,6 +26,7 @@ export interface TransferManifest {
   files: FileNode[];
   isFolder: boolean;
   isSizeEstimated?: boolean; // 🚨 [추가] ZIP 모드일 경우 정확한 크기를 알 수 없음
+  isZipStream?: boolean; // 🆕 [추가] Zip Streaming 모드 플래그 (다중 파일 전송 시 사용)
   // 🆕 Native QUIC 모드용 필드
   quicAddress?: string; // Sender의 QUIC 서버 주소 (예: "127.0.0.1:12345")
 }

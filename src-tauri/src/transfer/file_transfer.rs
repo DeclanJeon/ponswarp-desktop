@@ -2,8 +2,11 @@
 //!
 //! WebRTC를 대체하여 Native 환경에서 파일 전송을 담당합니다.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::fs::{self, File as StdFile};
+use std::io::{Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::{mpsc, RwLock};
@@ -54,6 +57,23 @@ pub struct TransferManifest {
 
 /// 청크 크기 (1MB - 고속 전송을 위해 증가)
 const CHUNK_SIZE: usize = 1024 * 1024;
+
+// --- State Management for File Streams (Tauri Commands) ---
+
+/// 파일 스트림 상태 관리 (여러 파일의 동시 쓰기를 위해)
+#[derive(Debug)]
+pub struct FileStreamManager {
+    /// 활성 파일 스트림 맵: FileId -> File Handle
+    pub file_streams: Mutex<HashMap<String, StdFile>>,
+}
+
+impl FileStreamManager {
+    pub fn new() -> Self {
+        Self {
+            file_streams: Mutex::new(HashMap::new()),
+        }
+    }
+}
 
 /// 파일 전송 엔진
 pub struct FileTransferEngine {
@@ -165,28 +185,45 @@ impl FileTransferEngine {
         let start_time = std::time::Instant::now();
         let mut last_progress_time = std::time::Instant::now();
 
+        info!("📤 데이터 전송 루프 시작: {} bytes", total_size);
+
         loop {
-            let n = reader.read(&mut buffer).await?;
-            if n == 0 {
-                break;
-            }
+            match reader.read(&mut buffer).await {
+                Ok(0) => {
+                    info!("📤 파일 끝에 도달 (EOF)");
+                    break;
+                }
+                Ok(n) => {
+                    info!("📤 {} bytes 읽음, 전송 중...", n);
+                    
+                    if let Err(e) = send.write_all(&buffer[..n]).await {
+                        warn!("📤 데이터 전송 실패: {}", e);
+                        return Err(anyhow::anyhow!("데이터 전송 실패: {}", e));
+                    }
+                    
+                    bytes_sent += n as u64;
 
-            send.write_all(&buffer[..n]).await?;
-            bytes_sent += n as u64;
-
-            // 진행률 보고 (200ms마다 - UI 스로틀링과 동기화)
-            let now = std::time::Instant::now();
-            if now.duration_since(last_progress_time).as_millis() >= 200 {
-                last_progress_time = now;
-                let elapsed = start_time.elapsed().as_secs_f64();
-                let speed = if elapsed > 0.0 {
-                    ((bytes_sent as f64) / elapsed) as u64
-                } else {
-                    0
-                };
-                self.report_progress(job_id, bytes_sent, total_size, speed).await;
+                    // 진행률 보고 (200ms마다 - UI 스로틀링과 동기화)
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_progress_time).as_millis() >= 200 {
+                        last_progress_time = now;
+                        let elapsed = start_time.elapsed().as_secs_f64();
+                        let speed = if elapsed > 0.0 {
+                            ((bytes_sent as f64) / elapsed) as u64
+                        } else {
+                            0
+                        };
+                        self.report_progress(job_id, bytes_sent, total_size, speed).await;
+                    }
+                }
+                Err(e) => {
+                    warn!("📤 파일 읽기 오류: {}", e);
+                    return Err(anyhow::anyhow!("파일 읽기 오류: {}", e));
+                }
             }
         }
+        
+        info!("📤 데이터 전송 루프 완료: {} bytes 전송됨", bytes_sent);
 
         // 🚨 [핵심 수정] 스트림 종료 - 빠른 완료 처리
         // 1. send 스트림을 finish()하여 EOF를 보냄 (Receiver가 데이터 끝을 알 수 있도록)
@@ -313,6 +350,174 @@ impl FileTransferEngine {
         self.update_state(TransferState::Failed("Cancelled by user".to_string())).await;
     }
 }
+
+// --- Warp Engine v2.0 File System Commands ---
+
+/// [Utility] 상대 경로를 절대 경로로 변환 (OS 구분자 자동 처리)
+#[tauri::command]
+pub fn resolve_path(base: String, relative: String) -> String {
+    let base_path = Path::new(&base);
+    let full_path = base_path.join(relative);
+    // 경로 정규화 및 문자열 변환
+    full_path.to_string_lossy().to_string()
+}
+
+/// [Scanning] 폴더 재귀적 스캔 (Sender용) - Warp Engine v2.0
+/// 폴더 내 모든 파일의 상대 경로와 메타데이터를 반환합니다.
+#[tauri::command]
+pub fn scan_folder(path: String) -> Result<Vec<serde_json::Value>, String> {
+    let mut files = Vec::new();
+    
+    fn scan_recursive(dir: &Path, base_path: &Path, files: &mut Vec<serde_json::Value>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                
+                if entry_path.is_dir() {
+                    // 하위 폴더 재귀 스캔 (숨겨진 폴더 제외)
+                    let folder_name = entry.file_name();
+                    if !folder_name.to_string_lossy().starts_with('.') {
+                        scan_recursive(&entry_path, base_path, files);
+                    }
+                } else if entry_path.is_file() {
+                    // 파일 메타데이터 수집
+                    let metadata = match fs::metadata(&entry_path) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    
+                    let file_name = entry.file_name()
+                        .to_string_lossy()
+                        .to_string();
+                    
+                    // 숨겨진 파일 제외 (.DS_Store, .git 등)
+                    if file_name.starts_with('.') {
+                        continue;
+                    }
+                    
+                    // 상대 경로 계산 (예: "src/utils/logger.ts")
+                    let relative_path = entry_path
+                        .strip_prefix(base_path)
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| file_name.clone());
+                    
+                    // OS 경로 구분자를 /로 정규화
+                    let relative_path = relative_path.replace('\\', "/");
+                    
+                    files.push(serde_json::json!({
+                        "name": file_name,
+                        "path": relative_path,
+                        "size": metadata.len(),
+                        "isFile": true
+                    }));
+                }
+            }
+        }
+    }
+    
+    let base_path = Path::new(&path);
+    scan_recursive(base_path, base_path, &mut files);
+    
+    println!("[Rust] 📁 Scanned {} files from folder: {}", files.len(), path);
+    Ok(files)
+}
+
+
+/// [Filesystem] 해당 파일 경로의 상위 디렉토리가 존재하는지 확인하고, 없으면 생성 (mkdir -p)
+#[tauri::command]
+pub fn ensure_dir_exists(file_path: String) -> Result<(), String> {
+    let path = Path::new(&file_path);
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
+        }
+    }
+    Ok(())
+}
+
+/// [File I/O] 파일 스트림 시작 (Create & Pre-allocate) - Warp Engine v2.0
+#[tauri::command]
+pub fn start_native_file_stream(
+    state: tauri::State<'_, FileStreamManager>,
+    file_id: String,
+    save_path: String,
+    total_size: u64,
+) -> Result<(), String> {
+    let path = Path::new(&save_path);
+
+    // 1. 파일 생성 (Create/Overwrite)
+    let file = StdFile::options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|e| format!("Failed to create file: {}", e))?;
+
+    // 2. 공간 미리 할당 (Pre-allocation for performance)
+    if total_size > 0 {
+        if let Err(e) = file.set_len(total_size) {
+            println!("[Rust] Warning: Failed to pre-allocate file ({} bytes): {}", total_size, e);
+            // Pre-allocation 실패는 치명적이지 않으므로 경고만 출력하고 진행
+        }
+    }
+
+    // 3. 상태 저장
+    state.file_streams.lock().unwrap().insert(file_id.clone(), file);
+    
+    println!("[Rust] File stream started: {}", save_path);
+    Ok(())
+}
+
+/// [File I/O] 청크 쓰기 (Seek & Write) - Warp Engine v2.0
+#[tauri::command]
+pub fn write_native_file_chunk(
+    state: tauri::State<'_, FileStreamManager>,
+    file_id: String,
+    chunk: Vec<u8>,
+    offset: i64,
+) -> Result<(), String> {
+    let mut streams = state.file_streams.lock().unwrap();
+    
+    if let Some(file) = streams.get_mut(&file_id) {
+        // Offset이 -1이면 현재 위치(Append), 아니면 Seek
+        if offset >= 0 {
+            file.seek(SeekFrom::Start(offset as u64))
+                .map_err(|e| format!("Seek failed: {}", e))?;
+        } else {
+            // -1인 경우 End로 이동 (혹은 현재 커서 유지)
+            // 보통 순차 쓰기이므로 seek이 필요 없을 수 있으나, 명시적으로 End로 이동
+            file.seek(SeekFrom::End(0))
+                .map_err(|e| format!("Seek end failed: {}", e))?;
+        }
+
+        file.write_all(&chunk)
+            .map_err(|e| format!("Write failed: {}", e))?;
+            
+        Ok(())
+    } else {
+        Err(format!("File stream not found: {}", file_id))
+    }
+}
+
+/// [File I/O] 스트림 종료 및 정리 - Warp Engine v2.0
+#[tauri::command]
+pub fn close_native_file_stream(
+    state: tauri::State<'_, FileStreamManager>,
+    file_id: String,
+) -> Result<(), String> {
+    let mut streams = state.file_streams.lock().unwrap();
+    
+    if let Some(file) = streams.remove(&file_id) {
+        // File은 Scope를 벗어나면 자동으로 close되지만, 확실하게 sync() 호출
+        file.sync_all().map_err(|e| format!("Sync failed: {}", e))?;
+        println!("[Rust] File stream closed: {}", file_id);
+        Ok(())
+    } else {
+        // 이미 닫혔거나 없는 경우 에러 처리하지 않음 (Idempotent)
+        Ok(())
+    }
+}
+
 
 impl Default for FileTransferEngine {
     fn default() -> Self {

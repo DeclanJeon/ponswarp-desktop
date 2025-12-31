@@ -566,7 +566,22 @@ const ReceiverView: React.FC = () => {
           'MB'
         );
 
-        // 1. 데스크탑: Native File Dialog 사용 (메모리 제한 없음)
+        // 2. [수정] Job ID 설정
+        // Sender가 Manifest에 담아 보낸 transferId를 사용해야 함.
+        // 만약 없다면(구버전 호환) timestamp 사용하지만 실패 확률 높음.
+        const transferId = (manifest as any).transferId;
+        
+        if (!transferId) {
+          console.error('[ReceiverView] Critical: No transferId in manifest. Update Sender.');
+          setErrorMsg("Protocol mismatch: Missing Transfer ID");
+          setStatus('ERROR');
+          setIsWaitingForSender(false);
+          return;
+        }
+
+        console.log('[ReceiverView] Using Transfer ID from manifest:', transferId);
+
+        //1. 데스크탑: Native File Dialog 사용 (메모리 제한 없음)
         let saveDir: string | null = null;
         try {
           const { invoke } = await import('@tauri-apps/api/core');
@@ -597,9 +612,10 @@ const ReceiverView: React.FC = () => {
 
         console.log('[ReceiverView] Save directory selected:', saveDir);
 
-        // 2. Rust 백엔드에 다운로드 작업 위임 (Web Worker 우회)
+        // 3. Rust 백엔드에 다운로드 작업 위임 (Web Worker 우회)
         // JS 스레드는 단순히 진행률 이벤트만 수신하므로 UI 멈춤 현상 완전 제거
-        const jobId = `recv-${Date.now()}`;
+        // Manifest에 있는 transferId를 사용하여 수신 요청
+        const jobId = transferId;
 
         // 진행률 초기화
         setProgressData({
@@ -610,8 +626,9 @@ const ReceiverView: React.FC = () => {
         });
 
         // 비동기로 파일 수신 시작 (await 하지 않음 - 진행률 이벤트로 UI 업데이트)
+        // receiveBatchFiles를 직접 호출하여 모든 파일을 순차적으로 수신
         nativeTransferService
-          .receiveFile(saveDir as string, jobId)
+          .receiveBatchFiles(saveDir as string, jobId)
           .then(savedPath => {
             console.log('[ReceiverView] ✅ File received:', savedPath);
             setStatus('DONE');
@@ -619,8 +636,13 @@ const ReceiverView: React.FC = () => {
           })
           .catch((recvError: any) => {
             console.error('[ReceiverView] Native receive failed:', recvError);
-            setErrorMsg(recvError.message || 'File receive failed');
-            setStatus('ERROR');
+            // 정상 종료인데 에러로 잡히는 경우 필터링 (옵션)
+            if (recvError.message?.includes('Batch receive finished')) {
+              setStatus('DONE');
+            } else {
+              setErrorMsg(recvError.message || 'File receive failed');
+              setStatus('ERROR');
+            }
             setIsWaitingForSender(false);
           });
 

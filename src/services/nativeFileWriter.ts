@@ -1,350 +1,290 @@
 /**
- * Native File Writer Service
- * Tauri 데스크탑 앱 전용 고성능 파일 저장
+ * Native File Writer Service (v2.0 - Warp Engine)
  *
- * StreamSaver.js를 대체하는 네이티브 Rust 기반 파일 I/O
- * - Zero-copy 전송 지원
- * - 메모리 효율적 스트리밍
- * - OS 네이티브 다이얼로그 연동
+ * [Capabilities]
+ * - Multi-file Switching: Automatically handles stream transitions based on FileIndex.
+ * - Directory Reconstruction: Creates folder structures on the fly.
+ * - Zero-copy I/O: Passes buffers directly to Rust backend.
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import { WasmReorderingBuffer } from './wasmReorderingBuffer';
 import { logInfo, logError, logWarn, logDebug } from '../utils/logger';
 import { HEADER_SIZE } from '../utils/constants';
 
-// 🚀 [Flow Control] 메모리 보호를 위한 워터마크 설정
-// 64MB 이상 쌓이면 PAUSE 요청, 32MB 이하로 떨어지면 RESUME 요청
+// Flow Control Watermarks
 const WRITE_BUFFER_HIGH_MARK = 64 * 1024 * 1024;
 const WRITE_BUFFER_LOW_MARK = 32 * 1024 * 1024;
 
 export class NativeFileWriter {
+  // Manifest & State
   private manifest: {
     totalSize: number;
     totalFiles?: number;
-    files?: Array<{ path: string }>;
+    files?: Array<{ path: string; size: number }>; // Added size to interface
     rootName?: string;
     isSizeEstimated?: boolean;
     downloadFileName?: string;
-  } = {
-    totalSize: 0,
-  };
+  } = { totalSize: 0 };
+
   private totalBytesWritten = 0;
-  private totalSize = 0;
   private startTime = 0;
   private lastProgressTime = 0;
   private isFinalized = false;
 
-  // 🆕 Native 전용 파일 ID
-  private fileId: string | null = null;
-  private savePath: string | null = null;
+  // File Handles
+  private currentFileIndex: number = -1;
+  private currentFileId: string | null = null;
+  private baseDir: string | null = null;
 
-  // 🚀 [추가] 재정렬 버퍼 (WASM 기반 고성능 버퍼)
-  private reorderingBuffer: WasmReorderingBuffer | null = null;
-
-  // 🚀 [추가] 쓰기 작업을 순차적으로 처리하기 위한 Promise 체인
+  // Buffer & Control
   private writeQueue: Promise<void> = Promise.resolve();
-
-  // 🚀 [속도 개선] 배치 버퍼 설정 (메모리에 모았다가 한 번에 쓰기)
   private writeBuffer: Uint8Array[] = [];
   private currentBatchSize = 0;
-  // 🚀 [네이티브 최적화] 더 큰 배치 크기 사용
-  // Rust 백엔드와 Zero-copy 통신을 위한 최적화된 크기
-  private readonly BATCH_THRESHOLD = 16 * 1024 * 1024; // 16MB
-
-  // 🚀 [핵심] 버퍼에 적재된 바이트 수 추적
   private pendingBytesInBuffer = 0;
-
-  // 🚀 버퍼 추적 및 흐름 제어 변수
   private isPaused = false;
+  private readonly BATCH_THRESHOLD = 16 * 1024 * 1024; // 16MB Batch
 
-  private onProgressCallback:
-    | ((data: {
-        progress: number;
-        speed: number;
-        bytesTransferred: number;
-        totalBytes: number;
-      }) => void)
-    | null = null;
+  // Callbacks
+  private onProgressCallback: ((data: any) => void) | null = null;
   private onCompleteCallback: ((actualSize: number) => void) | null = null;
   private onErrorCallback: ((error: string) => void) | null = null;
   private onFlowControlCallback: ((action: 'PAUSE' | 'RESUME') => void) | null = null;
 
   /**
-   * 스토리지 초기화 (네이티브 다이얼로그 연동)
+   * Initialize Storage
+   * Selects the BASE DIRECTORY for saving files.
    */
-  public async initStorage(manifest: {
-    totalSize: number;
-    totalFiles?: number;
-    files?: Array<{ path: string }>;
-    rootName?: string;
-    isSizeEstimated?: boolean;
-    downloadFileName?: string;
-  }): Promise<void> {
+  public async initStorage(manifest: any): Promise<void> {
     this.manifest = manifest;
-    this.totalSize = manifest.totalSize;
     this.startTime = Date.now();
     this.totalBytesWritten = 0;
     this.isFinalized = false;
+    this.currentFileIndex = -1;
     this.writeBuffer = [];
     this.currentBatchSize = 0;
     this.pendingBytesInBuffer = 0;
-    this.isPaused = false;
 
     const fileCount = manifest.totalFiles || manifest.files?.length || 0;
-    logInfo('[NativeFileWriter]', `Initializing for ${fileCount} files`);
-    logInfo(
-      '[NativeFileWriter]',
-      `Total size: ${((manifest.totalSize as number) / (1024 * 1024)).toFixed(2)} MB`
-    );
-
-    // 파일명 결정
-    let defaultFileName: string;
-    if (fileCount === 1) {
-      // 단일 파일: 원본 파일명
-      defaultFileName = manifest.files![0].path.split('/').pop()!;
-    } else {
-      // 여러 파일: ZIP 파일명
-      defaultFileName = (manifest.rootName || 'download') + '.zip';
-    }
+    logInfo('[NativeWriter]', `Initializing for ${fileCount} files. Total: ${(manifest.totalSize / 1024 / 1024).toFixed(2)} MB`);
 
     try {
-      // 🆕 네이티브 저장 다이얼로그 열기
-      this.fileId = this.generateFileId();
-
-      // Tauri 커맨드로 저장 다이얼로그 열기
-      const selectedPath = await invoke<string | null>('create_save_dialog', {
-        defaultName: defaultFileName
+      // 1. Select Base Directory
+      // Force directory selection to handle both single and multi-file logic uniformly
+      const selectedPath = await invoke<string | null>('open_file_dialog', {
+        directory: true,
+        multiple: false
       });
 
       if (!selectedPath) {
-        throw new Error('사용자가 저장을 취소했습니다');
+        throw new Error('User cancelled directory selection');
       }
 
-      this.savePath = selectedPath;
-
-      // Rust 백엔드에서 파일 스트리밍 시작
-      await invoke('start_file_stream', {
-        fileId: this.fileId,
-        savePath: this.savePath,
-        totalSize: manifest.totalSize
-      });
-
-      logInfo('[NativeFileWriter]', `✅ Native file stream started: ${this.fileId} -> ${this.savePath}`);
-      logInfo(
-        '[NativeFileWriter]',
-        `🚀 Strategy: Native Tauri I/O (Zero-copy)`
-      );
+      this.baseDir = selectedPath;
+      logInfo('[NativeWriter]', `Base directory set: ${this.baseDir}`);
 
     } catch (error) {
-      logError('[NativeFileWriter]', `❌ Native initialization failed: ${error}`);
+      logError('[NativeWriter]', `Init failed: ${error}`);
       throw error;
     }
   }
 
   /**
-   * 청크 쓰기 (Zero-copy Native 통신)
+   * Process Incoming Packet
    */
   public async writeChunk(packet: ArrayBuffer): Promise<void> {
-    const chunk = new Uint8Array(packet);
-    if (!this.fileId || this.isFinalized) {
-      logWarn('[NativeFileWriter]', '❌ Cannot write: file not initialized or already finalized');
-      return;
-    }
+    if (this.isFinalized) return;
 
-    // 🚀 [성능 최적화] Rust 백엔드로 직접 전송 (브라우저 스택 우회)
+    // Queue writes to ensure sequential processing
     this.writeQueue = this.writeQueue.then(async () => {
       try {
-        // WASM 재정렬 버퍼 사용 (필요시)
-        const orderedChunk = this.reorderingBuffer
-          ? chunk // 임시로 직접 사용 (processChunk 메소드는 추후 구현)
-          : chunk;
-
-        // 🆕 Native 커맨드로 청크 전송 (Zero-copy)
-        await invoke('write_file_chunk', {
-          fileId: this.fileId,
-          chunk: Array.from(orderedChunk), // Rust Vec<u8>로 변환
-          offset: this.totalBytesWritten // 순차적 쓰기 위치
-        });
-
-        this.totalBytesWritten += orderedChunk.length;
-        this.pendingBytesInBuffer += orderedChunk.length;
-
-        // 진행률 업데이트
-        this.updateProgress();
-
-        // 🚀 [흐름 제어] 메모리 보호
-        if (this.pendingBytesInBuffer >= WRITE_BUFFER_HIGH_MARK && !this.isPaused) {
-          this.isPaused = true;
-          this.onFlowControlCallback?.('PAUSE');
-          logDebug('[NativeFileWriter]', '⏸️ Memory high watermark - PAUSED');
-        }
-
+        await this.processChunkInternal(packet);
       } catch (error) {
-        logError('[NativeFileWriter]', `❌ Chunk write failed: ${error}`);
+        logError('[NativeWriter]', 'Write error:', error);
         this.onErrorCallback?.(String(error));
         throw error;
       }
+    }).catch(() => {
+      logWarn('[NativeWriter]', 'Recovering from write error chain');
     });
+
+    return this.writeQueue;
   }
 
-  /**
-   * 메모리 버퍼 해제 요청 (흐름 제어)
-   */
-  public async flushBuffer(): Promise<void> {
-    // Native 모드에서는 Rust가 자동으로 버퍼링하므로
-    // 흐름 제어 신지만 처리
-    if (this.isPaused && this.pendingBytesInBuffer <= WRITE_BUFFER_LOW_MARK) {
-      this.isPaused = false;
-      this.onFlowControlCallback?.('RESUME');
-      logDebug('[NativeFileWriter]', '▶️ Memory low watermark - RESUMED');
-    }
+  private async processChunkInternal(packet: ArrayBuffer): Promise<void> {
+    if (packet.byteLength < HEADER_SIZE) return;
 
-    this.pendingBytesInBuffer = 0; // Reset buffer tracking
-  }
+    const view = new DataView(packet);
+    
+    // 1. Parse Header
+    const fileIndex = view.getUint16(0, true);
+    const offset = Number(view.getBigUint64(6, true)); // 64-bit offset
+    const dataLen = view.getUint32(14, true);
 
-  /**
-   * 암호화 키 설정
-   */
-  public setEncryptionKey(sessionKey: Uint8Array, randomPrefix: Uint8Array): void {
-    // Native 암호화는 Rust 레벨에서 처리하므로 여기서는 키만 저장
-    logDebug('[NativeFileWriter]', '🔐 Encryption keys set for native processing');
-  }
-
-  /**
-   * 진행률 및 흐름 제어 콜백 설정
-   */
-  public onProgress(
-    cb: (data: {
-      progress: number;
-      speed: number;
-      bytesTransferred: number;
-      totalBytes: number;
-    }) => void
-  ): void {
-    this.onProgressCallback = cb;
-  }
-
-  public onComplete(cb: (actualSize: number) => void): void {
-    this.onCompleteCallback = cb;
-  }
-
-  public onError(cb: (err: string) => void): void {
-    this.onErrorCallback = cb;
-  }
-
-  public onFlowControl(cb: (action: 'PAUSE' | 'RESUME') => void): void {
-    this.onFlowControlCallback = cb;
-  }
-
-  /**
-   * 파일 저장 완료 처리
-   */
-  public async cleanup(): Promise<void> {
-    if (this.isFinalized) {
+    // 2. Check EOS (End of Stream)
+    if (fileIndex === 0xffff) {
+      logInfo('[NativeWriter]', 'EOS signal received. Finalizing...');
+      await this.flushBuffer();
+      await this.finalize();
       return;
     }
 
-    // 모든 쓰기 작업이 완료되도록 대기
-    await this.writeQueue;
+    // 3. File Switching Logic
+    if (fileIndex !== this.currentFileIndex) {
+      logDebug('[NativeWriter]', `File Switch: ${this.currentFileIndex} -> ${fileIndex}`);
+      // Flush previous file's buffer before switching
+      await this.flushBuffer();
+      await this.switchFile(fileIndex);
+    }
 
-    try {
-      if (this.fileId) {
-        // 🆕 Native 스트림 완료 커맨드
-        const finalPath = await invoke<string>('complete_file_stream', {
-          fileId: this.fileId,
-          finalSize: this.totalBytesWritten
-        });
+    // 4. Buffer Data
+    // Note: We use offset relative to the CURRENT FILE
+    const data = new Uint8Array(packet, HEADER_SIZE, dataLen);
+    
+    // Create copy of slice to prevent buffer detachment issues if packet is reused
+    const chunkCopy = new Uint8Array(data);
 
-        logInfo('[NativeFileWriter]', `✅ File stream completed: ${finalPath}`);
-        this.onCompleteCallback?.(this.totalBytesWritten);
-      }
+    this.writeBuffer.push(chunkCopy);
+    this.currentBatchSize += chunkCopy.byteLength;
+    this.pendingBytesInBuffer += chunkCopy.byteLength;
 
-    } catch (error) {
-      logError('[NativeFileWriter]', `❌ Cleanup failed: ${error}`);
-      this.onErrorCallback?.(String(error));
-    } finally {
-      this.isFinalized = true;
-      this.fileId = null;
-      this.savePath = null;
+    // 5. Backpressure Check
+    this.checkBackpressure();
 
-      // 재정렬 버퍼 정리
-      if (this.reorderingBuffer) {
-        this.reorderingBuffer.cleanup();
-        this.reorderingBuffer = null;
-      }
-
-      logInfo('[NativeFileWriter]', '🧹 Native file writer cleaned up');
+    // 6. Flush if threshold reached
+    if (this.currentBatchSize >= this.BATCH_THRESHOLD) {
+      await this.flushBuffer();
     }
   }
 
   /**
-   * 진행률 업데이트
+   * Switches the active file stream
+   * Creates directories if needed.
    */
-  private updateProgress(): void {
-    if (!this.onProgressCallback) return;
+  private async switchFile(newIndex: number): Promise<void> {
+    // Close existing stream
+    if (this.currentFileId) {
+      await invoke('close_file_stream', { fileId: this.currentFileId });
+      this.currentFileId = null;
+    }
 
+    this.currentFileIndex = newIndex;
+    const fileNode = this.manifest.files![newIndex];
+    if (!fileNode) {
+      throw new Error(`File index ${newIndex} out of bounds`);
+    }
+
+    // Construct full path
+    // Rust side 'resolve_path' is safer, but we can do simple join for now if platform separator is handled
+    // We rely on Tauri's invoke to handle path joining properly
+    
+    const relativePath = fileNode.path; // e.g. "folder/sub/file.txt"
+    const fullPath = await invoke<string>('resolve_path', {
+      base: this.baseDir,
+      relative: relativePath
+    });
+
+    // Create parent directories
+    await invoke('ensure_dir_exists', { filePath: fullPath });
+
+    // Start new stream
+    this.currentFileId = `file_${newIndex}_${Date.now()}`;
+    
+    logInfo('[NativeWriter]', `Opening file: ${fileNode.path} (${(fileNode.size / 1024).toFixed(1)} KB)`);
+    
+    await invoke('start_file_stream', {
+      fileId: this.currentFileId,
+      savePath: fullPath,
+      totalSize: fileNode.size // Pre-allocate hint
+    });
+  }
+
+  private async flushBuffer(): Promise<void> {
+    if (this.writeBuffer.length === 0 || !this.currentFileId) return;
+
+    // Merge chunks
+    const mergedBuffer = new Uint8Array(this.currentBatchSize);
+    let offset = 0;
+    for (const chunk of this.writeBuffer) {
+      mergedBuffer.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+
+    // Write to Rust
+    await invoke('write_file_chunk', {
+      fileId: this.currentFileId,
+      chunk: Array.from(mergedBuffer),
+      offset: -1 // -1 means "append" or "current position"
+    });
+
+    this.totalBytesWritten += this.currentBatchSize;
+    this.pendingBytesInBuffer -= this.currentBatchSize;
+    
+    // Reset buffer
+    this.writeBuffer = [];
+    this.currentBatchSize = 0;
+
+    // Resume if paused
+    this.checkBackpressure();
+    this.reportProgress();
+  }
+
+  private checkBackpressure() {
+    if (!this.isPaused && this.pendingBytesInBuffer >= WRITE_BUFFER_HIGH_MARK) {
+      this.isPaused = true;
+      this.onFlowControlCallback?.('PAUSE');
+      logWarn('[NativeWriter]', 'High watermark reached - PAUSING');
+    } else if (this.isPaused && this.pendingBytesInBuffer <= WRITE_BUFFER_LOW_MARK) {
+      this.isPaused = false;
+      this.onFlowControlCallback?.('RESUME');
+      logInfo('[NativeWriter]', 'Low watermark reached - RESUMING');
+    }
+  }
+
+  private reportProgress(): void {
     const now = Date.now();
-    if (now - this.lastProgressTime < 100) return; // 100ms마다 업데이트
+    if (now - this.lastProgressTime < 100) return;
 
-    const progress = this.totalSize > 0
-      ? (this.totalBytesWritten / this.totalSize) * 100
+    const progress = this.manifest.totalSize > 0
+      ? (this.totalBytesWritten / this.manifest.totalSize) * 100
       : 0;
-
-    const elapsed = (now - this.startTime) / 1000; // 초
+    
+    const elapsed = (now - this.startTime) / 1000;
     const speed = elapsed > 0 ? this.totalBytesWritten / elapsed : 0;
 
-    this.onProgressCallback({
+    this.onProgressCallback?.({
       progress,
       speed,
       bytesTransferred: this.totalBytesWritten,
-      totalBytes: this.totalSize,
+      totalBytes: this.manifest.totalSize
     });
-
     this.lastProgressTime = now;
   }
 
-  /**
-   * 고유 파일 ID 생성
-   */
-  private generateFileId(): string {
-    return `native_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  }
+  private async finalize(): Promise<void> {
+    if (this.isFinalized) return;
+    this.isFinalized = true;
 
-  /**
-   * 🆕 네이티브 저장 다이얼로그로 폴더 선택
-   */
-  public static async selectSaveDirectory(): Promise<string | null> {
-    try {
-      const selected = await invoke<string | null>('select_save_directory');
-      return selected;
-    } catch (error) {
-      logError('[NativeFileWriter]', `❌ Directory selection failed: ${error}`);
-      return null;
+    // Close last file
+    if (this.currentFileId) {
+      await invoke('close_file_stream', { fileId: this.currentFileId });
     }
+
+    logInfo('[NativeWriter]', `Transfer Complete! Total written: ${this.totalBytesWritten} bytes`);
+    this.onCompleteCallback?.(this.totalBytesWritten);
   }
 
-  /**
-   * 🆕 저장 공간 확인
-   */
-  public static async checkStorageSpace(path: string): Promise<{
-    availableBytes: number;
-    totalBytes: number;
-    availableGB: number;
-    totalGB: number;
-  }> {
-    try {
-      const space = await invoke<any>('check_storage_space', { path });
-      return space;
-    } catch (error) {
-      logError('[NativeFileWriter]', `❌ Storage space check failed: ${error}`);
-      // Fallback 값 반환
-      return {
-        availableBytes: 100 * 1024 * 1024 * 1024, // 100GB
-        totalBytes: 500 * 1024 * 1024 * 1024,     // 500GB
-        availableGB: 100.0,
-        totalGB: 500.0,
-      };
+  // --- Public Listeners ---
+  public onProgress(cb: any) { this.onProgressCallback = cb; }
+  public onComplete(cb: any) { this.onCompleteCallback = cb; }
+  public onError(cb: any) { this.onErrorCallback = cb; }
+  public onFlowControl(cb: any) { this.onFlowControlCallback = cb; }
+  public setEncryptionKey() { /* Native handles crypto in Rust if needed */ }
+
+  public async cleanup(): Promise<void> {
+    this.isFinalized = true;
+    if (this.currentFileId) {
+      try { await invoke('close_file_stream', { fileId: this.currentFileId }); } 
+      catch {}
     }
   }
 }

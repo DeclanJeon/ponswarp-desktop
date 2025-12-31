@@ -34,7 +34,7 @@ const FILE_READ_CHUNK_SIZE = 64 * 1024;
 
 // 🆕 파일 전송 작업을 위한 인터페이스
 interface TransferJob {
-  filePath: string;  // 로컬 절대 경로
+  filePath: string; // 로컬 절대 경로
   fileIndex: number; // Manifest 상의 인덱스
   fileName: string;
 }
@@ -184,7 +184,10 @@ class NativeTransferService {
       logInfo('[NativeTransfer]', '🔗 QUIC 피어 연결됨:', event.payload);
 
       // 중복 연결 방지: 이미 전송 중이거나 같은 피어면 무시
-      if ((this.isTransferring || this.isZipping) && this.currentPeerId === event.payload.peerId) {
+      if (
+        (this.isTransferring || this.isZipping) &&
+        this.currentPeerId === event.payload.peerId
+      ) {
         logWarn(
           '[NativeTransfer]',
           '이미 전송 세션이 활성화되어 있습니다. 중복 연결 무시.'
@@ -593,7 +596,10 @@ class NativeTransferService {
 
   /**
    * 🆕 [UPDATED] 전송 시작 진입점
-   * 파일이 1개면 직접 전송, 2개 이상이거나 폴더면 Zip 스트리밍 전송
+   * 다중 파일 및 단일 파일 전송을 배치 전송으로 처리
+   *
+   * @참고: Zip Streaming은 백엔드(send_stream_chunk) 미구현으로 인해 비활성화됨
+   * 대신 순차적 배치 전송을 사용하여 다중 파일 전송을 지원함
    */
   async startTransferDispatcher(files: any[], peerId: string): Promise<void> {
     if (this.isTransferring || this.isZipping) {
@@ -601,23 +607,33 @@ class NativeTransferService {
       return;
     }
 
-    const isMultiple = files.length > 1;
-
-    if (isMultiple) {
-      logInfo('[NativeTransfer]', `Starting ZIP Stream transfer for ${files.length} files.`);
-      await this.sendZipStream(files, peerId);
-    } else {
-      logInfo('[NativeTransfer]', `Starting Single File transfer: ${files[0].name}`);
-      // 단일 파일도 기존 배치 전송 로직 사용
-      await this.startBatchTransfer(files, peerId);
+    if (files.length === 0) {
+      logWarn('[NativeTransfer]', 'No files to transfer.');
+      return;
     }
+
+    logInfo(
+      '[NativeTransfer]',
+      `Starting batch transfer for ${files.length} file(s).`
+    );
+    await this.startBatchTransfer(files, peerId);
   }
 
   /**
-   * 🆕 [NEW] Zip Streaming Transfer
+   * 🆕 [OPTIMIZED] Zip Streaming Transfer
    * 파일을 순차적으로 읽어서 WASM Zip64Stream에 넣고, 나오는 청크를 즉시 QUIC으로 전송합니다.
+   * 
+   * 개선 사항:
+   * - 진행률 계산 정확도 향상 (원본 파일 크기 기반)
+   * - 에러 처리 강화 (연결 끊김 시 안전하게 정리)
+   * - 상세한 로깅 추가
    */
   async sendZipStream(files: any[], peerId: string): Promise<void> {
+    if (this.isZipping || this.isTransferring) {
+      logWarn('[NativeTransfer]', 'Transfer already in progress, ignoring duplicate zip stream request.');
+      return;
+    }
+
     this.isZipping = true;
     this.currentPeerId = peerId;
     this.currentJobId = `zip-${Date.now()}`;
@@ -625,85 +641,162 @@ class NativeTransferService {
     // UI 상태 업데이트
     this.emit('status', 'TRANSFERRING');
 
+    let zip: Zip64Stream | null = null;
+
     try {
-      // 1. Zip Stream 초기화 (Compression Level 0-9, 0=Store, 1=Fastest)
-      // 속도를 위해 1 권장, 압축률보다 묶는게 목적이라면 0
-      const zip = new Zip64Stream(1);
+      // 1. Zip Stream 초기화 (Compression Level 1 = Fastest)
+      // 속도 우선: 1 (빠름), 압축률 우선: 9, 압축 없이 묶기: 0
+      zip = new Zip64Stream(1);
 
       // 전체 진행률 계산을 위한 변수
       let totalBytesProcessed = 0;
-      const totalBytesOriginal = files.reduce((acc, f) => acc + (f.nativeSize || f.size || 0), 0);
+      const totalBytesOriginal = files.reduce(
+        (acc, f) => acc + (f.nativeSize || f.size || 0),
+        0
+      );
 
-      // 2. 가상의 Zip 파일명 생성
+      // Zip 파일명 생성 (현재 시간 사용)
       const zipFileName = `archive_${Date.now()}.zip`;
 
-      logInfo('[NativeTransfer]', `Streaming ZIP: ${zipFileName}, Total Source Size: ${totalBytesOriginal}`);
+      logInfo(
+        '[NativeTransfer]',
+        `🚀 Starting Zip Stream: ${zipFileName}, Files: ${files.length}, Total Size: ${this.formatBytes(totalBytesOriginal)}`
+      );
 
-      // 3. 파일 순회 및 스트리밍
+      // 2. 파일 순회 및 스트리밍
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
+
         // 중요: 상대 경로 사용! (폴더 구조 보존 핵심)
-        const zipEntryName = file.relativePath || file.name;
+        // 안전한 값 추출 순서: relativePath -> name -> path에서 파일명 추출
+        let zipEntryName = file.relativePath || file.name;
+
+        // 두 값이 모두 없으면 path에서 파일명 추출
+        if (!zipEntryName) {
+          zipEntryName = file.path?.split(/[\\/]/).pop() || `file_${i}`;
+        }
+
         const fileSize = BigInt(file.nativeSize || file.size || 0);
 
-        logDebug('[NativeTransfer]', `Zipping file: ${zipEntryName} (${fileSize})`);
+        logDebug(
+          '[NativeTransfer]',
+          `[${i + 1}/${files.length}] Adding to zip: ${zipEntryName} (${this.formatBytes(Number(fileSize))})`
+        );
 
         // A. Zip Entry 시작 (Local File Header)
         const headerChunk = zip.begin_file(zipEntryName, fileSize);
-        await this.sendRawChunkToPeer(peerId, this.currentJobId, headerChunk);
+        
+        // Header 청크 전송
+        if (headerChunk.length > 0) {
+          await this.sendRawChunkToPeer(peerId, this.currentJobId, headerChunk);
+          logDebug('[NativeTransfer]', `  - Header sent: ${headerChunk.length} bytes`);
+        }
 
         // B. 파일 내용 읽기 및 압축
         // 파일 읽기 (Rust 백엔드에서 청크 단위로 읽어야 함)
         // 현재 구조에서는 invoke로 파일 전체를 읽는 방식 사용
+        // TODO: 대용량 파일(2GB+)를 위해 청크 단위 읽기 구현 필요
         try {
+          const nativePath = file.nativePath || file.path || (file as any).path;
+          
+          logDebug('[NativeTransfer]', `  - Reading file from: ${nativePath}`);
+          
           const fileData = await invoke<Uint8Array>('read_file_as_bytes', {
-            path: file.nativePath || file.path || (file as any).path,
+            path: nativePath,
           });
 
           // WASM을 통해 압축
+          logDebug('[NativeTransfer]', `  - Compressing ${fileData.length} bytes...`);
           const compressedChunk = zip.process_chunk(fileData);
 
           // 압축된 데이터 전송
           if (compressedChunk.length > 0) {
-            await this.sendRawChunkToPeer(peerId, this.currentJobId, compressedChunk);
+            await this.sendRawChunkToPeer(
+              peerId,
+              this.currentJobId,
+              compressedChunk
+            );
+            logDebug('[NativeTransfer]', `  - Compressed chunk sent: ${compressedChunk.length} bytes`);
           }
 
-          totalBytesProcessed += fileData.length;
+          totalBytesProcessed += Number(fileSize);
 
-          // 진행률 업데이트
+          // 진행률 업데이트 (원본 파일 크기 기반)
           this.emitProgress(totalBytesProcessed, totalBytesOriginal);
         } catch (readError) {
-          logError('[NativeTransfer]', `파일 읽기 실패: ${zipEntryName}`, readError);
-          throw readError;
+          logError(
+            '[NativeTransfer]',
+            `❌ Failed to read file: ${zipEntryName}`,
+            readError
+          );
+          // 파일 읽기 실패 시 스트림을 정리하고 에러 전파
+          throw new Error(`Failed to read file ${zipEntryName}: ${readError}`);
         }
 
         // C. Zip Entry 종료 (Data Descriptor)
         const footerChunk = zip.end_file();
-        await this.sendRawChunkToPeer(peerId, this.currentJobId, footerChunk);
+        
+        if (footerChunk.length > 0) {
+          await this.sendRawChunkToPeer(peerId, this.currentJobId, footerChunk);
+          logDebug('[NativeTransfer]', `  - Footer sent: ${footerChunk.length} bytes`);
+        }
       }
 
-      // 4. Zip 종료 (Central Directory)
+      // 3. Zip 종료 (Central Directory)
+      logInfo('[NativeTransfer]', '📦 Finalizing ZIP (Central Directory)...');
       const finalChunk = zip.finalize();
-      await this.sendRawChunkToPeer(peerId, this.currentJobId, finalChunk);
+      
+      if (finalChunk.length > 0) {
+        await this.sendRawChunkToPeer(peerId, this.currentJobId, finalChunk);
+        logInfo('[NativeTransfer]', `✅ Central Directory sent: ${finalChunk.length} bytes`);
+      }
 
-      // 5. 전송 완료 신호 (EOF)
+      // 4. 전송 완료 신호 (EOF)
       // 스트림 전송 완료를 알리는 0바이트 청크 전송
-      await this.sendRawChunkToPeer(peerId, this.currentJobId, new Uint8Array(0));
+      await this.sendRawChunkToPeer(
+        peerId,
+        this.currentJobId,
+        new Uint8Array(0)
+      );
 
-      logInfo('[NativeTransfer]', 'Zip Stream transfer complete.');
+      logInfo('[NativeTransfer]', '✅ Zip Stream transfer complete.');
       this.isZipping = false;
       this.emit('status', 'COMPLETED');
       this.emit('complete', { jobId: this.currentJobId });
 
-      // Clean up WASM memory
-      zip.free();
-
+      // Receiver에게 완료 알림
+      if (this.currentRoomId) {
+        rustSignalingAdapter.sendTransferComplete(this.currentRoomId);
+      }
     } catch (error) {
-      console.error('[NativeTransfer] Zip transfer failed:', error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logError('[NativeTransfer]', '❌ Zip transfer failed:', { error, errorMessage });
+      
       this.isZipping = false;
-      this.emit('error', error);
+      this.emit('error', { message: `Zip Stream Failed: ${errorMessage}` });
       this.emit('status', 'ERROR');
+    } finally {
+      // Clean up WASM memory
+      if (zip) {
+        try {
+          zip.free();
+          logDebug('[NativeTransfer]', 'WASM Zip memory freed');
+        } catch (freeError) {
+          logWarn('[NativeTransfer]', 'Failed to free WASM memory:', freeError);
+        }
+      }
     }
+  }
+
+  /**
+   * 바이트 크기를 사람이 읽기 쉬운 형식으로 변환
+   */
+  private formatBytes(bytes: number): string {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
   }
 
   /**
@@ -711,7 +804,11 @@ class NativeTransferService {
    * 🚨 [주의] 현재 Rust Backend에는 send_stream_chunk API가 없을 수 있음
    * 필요시 별도의 스트림 전송 명령어를 구현해야 함
    */
-  private async sendRawChunkToPeer(peerId: string, jobId: string, data: Uint8Array): Promise<void> {
+  private async sendRawChunkToPeer(
+    peerId: string,
+    jobId: string,
+    data: Uint8Array
+  ): Promise<void> {
     try {
       // Array.from()은 오버헤드가 있을 수 있으므로 Tauri v2의 바이너리 전송 최적화 확인 필요
       // 여기서는 일반적인 invoke 호출로 가정
@@ -719,11 +816,15 @@ class NativeTransferService {
       await invoke('send_stream_chunk', {
         peerId,
         jobId,
-        data: Array.from(data) // Tauri가 Vec<u8>로 변환
+        data: Array.from(data), // Tauri가 Vec<u8>로 변환
       });
     } catch (error) {
       // send_stream_chunk가 없을 경우 대체 방식 시도
-      logWarn('[NativeTransfer]', 'send_stream_chunk 실패, 스트림 전송 모드 지원되지 않음', error);
+      logWarn(
+        '[NativeTransfer]',
+        'send_stream_chunk 실패, 스트림 전송 모드 지원되지 않음',
+        error
+      );
       throw new Error('Stream transfer not supported by backend');
     }
   }
@@ -734,7 +835,11 @@ class NativeTransferService {
   private emitProgress(processed: number, total: number) {
     const now = Date.now();
     // 200ms 스로틀링
-    if (now - this.lastProgressEmit < this.PROGRESS_THROTTLE_MS && processed < total) return;
+    if (
+      now - this.lastProgressEmit < this.PROGRESS_THROTTLE_MS &&
+      processed < total
+    )
+      return;
     this.lastProgressEmit = now;
 
     const progress = total > 0 ? (processed / total) * 100 : 0;
@@ -742,7 +847,7 @@ class NativeTransferService {
       progress,
       bytesTransferred: processed,
       totalBytes: total,
-      speed: 0 // 속도 계산 로직은 별도 구현 필요 (생략)
+      speed: 0, // 속도 계산 로직은 별도 구현 필요 (생략)
     });
   }
 
@@ -794,8 +899,11 @@ class NativeTransferService {
   /**
    * 🆕 [CORE ALGORITHM] 다중 파일 일괄 전송 시작
    * SenderView에서 파일 목록을 받아 순차적으로 전송합니다.
+   * @param files 전송할 파일 목록
+   * @param peerId 상대방 ID
+   * @param baseJobId [NEW] Manifest와 동기화된 전송 ID
    */
-  async startBatchTransfer(files: any[], peerId: string): Promise<void> {
+  async startBatchTransfer(files: any[], peerId: string, baseJobId?: string): Promise<void> {
     if (this.isTransferring) {
       logWarn('[NativeTransfer]', '이미 전송 중입니다.');
       return;
@@ -803,18 +911,25 @@ class NativeTransferService {
 
     this.isTransferring = true;
     this.currentPeerId = peerId;
-    this.currentJobId = `batch-${Date.now()}`;
-    this.totalBatchSize = files.reduce((acc, f) => acc + (f.nativeSize || f.size || 0), 0);
+    // Manifest와 동일한 ID 사용 (없으면 생성하지만, 불일치 위험 있음)
+    this.currentJobId = baseJobId || `batch-${Date.now()}`;
+    this.totalBatchSize = files.reduce(
+      (acc, f) => acc + (f.nativeSize || f.size || 0),
+      0
+    );
     this.totalBatchSent = 0;
 
     // 큐 생성: files 배열의 순서(Index)가 Manifest와 일치해야 함
     this.transferQueue = files.map((f, index) => ({
       filePath: f.nativePath || f.path || (f as any).path, // 절대 경로
       fileIndex: index,
-      fileName: f.name
+      fileName: f.name,
     }));
 
-    logInfo('[NativeTransfer]', `배치 전송 시작: 총 ${files.length}개 파일, ${this.totalBatchSize} bytes`);
+    logInfo(
+      '[NativeTransfer]',
+      `배치 전송 시작: 총 ${files.length}개 파일, ${this.totalBatchSize} bytes`
+    );
     this.emit('status', 'TRANSFERRING');
 
     // 큐 처리 시작
@@ -856,9 +971,11 @@ class NativeTransferService {
       // 다음 파일 처리 (재귀 호출)
       // 약간의 딜레이를 주어 Rust 스레드 정리 시간을 벰
       setTimeout(() => this.processTransferQueue(), 50);
-
     } catch (error) {
-      logError(`[NativeTransfer] 파일 전송 중 오류 발생 (${job.fileName}):`, error);
+      logError(
+        `[NativeTransfer] 파일 전송 중 오류 발생 (${job.fileName}):`,
+        error
+      );
       this.emit('error', error);
       this.isTransferring = false;
       this.transferQueue = []; // 남은 큐 정리
@@ -976,13 +1093,19 @@ class NativeTransferService {
   }
 
   /**
-   * 파일 수신 (Receiver)
+   * 🆕 다중 파일 순차 수신 (Receiver)
+   * Sender가 파일을 순차적으로 전송할 때, 각 파일을 순차적으로 수신합니다.
+   * 
+   * 구현 방식:
+   * 1. Sender가 첫 번째 파일 전송을 시작하면 수신
+   * 2. 수신 완료 후 다음 파일 수신 대기
+   * 3. 더 이상 수신할 파일이 없으면 완료
    */
-  async receiveFile(saveDir: string, jobId: string): Promise<string> {
+  async receiveBatchFiles(saveDir: string, baseJobId: string): Promise<string> {
     // 🆕 [핵심 수정] 연결 상태 확인 로직 개선
     logDebug(
       '[NativeTransfer]',
-      `receiveFile 호출됨 - connected: ${this.connected}, peerId: ${this.currentPeerId}`
+      `receiveBatchFiles 호출됨 - connected: ${this.connected}, peerId: ${this.currentPeerId}`
     );
 
     if (!this.connected || !this.currentPeerId) {
@@ -1009,68 +1132,114 @@ class NativeTransferService {
       }
     }
 
+    let fileIndex = 0;
+    let lastSavedPath = '';
+
     try {
-      logInfo('[NativeTransfer]', `파일 수신 대기: ${saveDir}`);
+      logInfo('[NativeTransfer]', `배치 파일 수신 시작: ${saveDir}`);
       this.emit('status', 'RECEIVING');
 
-      const savedPath = await invoke<string>('receive_file_from_peer', {
-        peerId: this.currentPeerId,
-        saveDir,
-        jobId,
-      });
+      // 🆕 다중 파일 수신 루프
+      while (true) {
+        const jobId = `${baseJobId}-${fileIndex}`;
+
+        try {
+          logInfo(
+            '[NativeTransfer]',
+            `파일 수신 대기 (${fileIndex}): ${jobId}`
+          );
+
+          const savedPath = await invoke<string>('receive_file_from_peer', {
+            peerId: this.currentPeerId,
+            saveDir,
+            jobId,
+          });
+
+          lastSavedPath = savedPath;
+          logInfo(
+            '[NativeTransfer]',
+            `파일 수신 완료 (${fileIndex}): ${savedPath}`
+          );
+
+          fileIndex++;
+
+          // 진행률 업데이트 (파일 수신 성공 마다)
+          this.emit('status', 'RECEIVING');
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+
+          // 🚨 [핵심 수정] 전송 완료 후 발생하는 정상적인 연결 종료 에러들
+          const isNormalClose =
+            errorMessage.includes('connection lost') ||
+            errorMessage.includes('closed') ||
+            errorMessage.includes('reset') ||
+            errorMessage.includes('stopped') ||
+            errorMessage.includes('STOP_SENDING') ||
+            errorMessage.includes('peer');
+
+          // 🆕 첫 번째 파일 수신 중 정상 종료가 감지되면 모든 파일 수신 완료로 간주
+          if (isNormalClose && fileIndex > 0) {
+            logInfo(
+              '[NativeTransfer]',
+              `연결 종료 감지 - ${fileIndex}개 파일 수신 완료로 간주`
+            );
+
+            // 완료 이벤트 발생
+            this.emit('status', 'COMPLETED');
+            this.emit('complete', {
+              jobId: baseJobId,
+              message: `Batch transfer completed (${fileIndex} files)`,
+            });
+
+            // 🆕 Sender에게 전송 완료 알림 (시그널링 서버 통해)
+            this.notifyTransferComplete();
+
+            return lastSavedPath; // 마지막으로 수신된 파일 경로 반환
+          }
+
+          // 🆕 파일 수신 시작 전에 연결이 끊어진 경우
+          if (fileIndex === 0 && !isNormalClose) {
+            throw error;
+          }
+
+          // 그 외의 경우에는 루프 종료 (모든 파일 수신 완료)
+          break;
+        }
+      }
 
       this.emit('status', 'COMPLETED');
-      logInfo('[NativeTransfer]', `파일 수신 완료: ${savedPath}`);
+      logInfo(
+        '[NativeTransfer]',
+        `배치 파일 수신 완료: 총 ${fileIndex}개 파일`
+      );
 
       // 🆕 Sender에게 전송 완료 알림 (시그널링 서버 통해)
       this.notifyTransferComplete();
 
-      return savedPath;
+      return lastSavedPath;
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
 
-      // 🚨 [핵심 수정] 전송 완료 후 발생하는 정상적인 연결 종료 에러들
-      // - "connection lost": 연결이 끊어짐
-      // - "closed": 스트림/연결이 닫힘
-      // - "reset": 연결이 리셋됨
-      // - "stopped": Sender가 스트림을 finish()로 종료함 (정상)
-      // - "sending stopped by peer": QUIC 스트림 종료 신호
-      const isNormalClose =
-        errorMessage.includes('connection lost') ||
-        errorMessage.includes('closed') ||
-        errorMessage.includes('reset') ||
-        errorMessage.includes('stopped') ||
-        errorMessage.includes('STOP_SENDING') ||
-        errorMessage.includes('peer');
-
-      if (isNormalClose) {
-        logWarn(
-          '[NativeTransfer]',
-          '연결 종료 감지 - 전송 완료 후 정상일 수 있음:',
-          errorMessage
-        );
-
-        // 완료 이벤트 발생 (에러 대신)
-        this.emit('status', 'COMPLETED');
-        this.emit('complete', {
-          jobId,
-          message: 'Transfer completed (connection closed by sender)',
-        });
-
-        // 🆕 Sender에게 전송 완료 알림 (시그널링 서버 통해)
-        this.notifyTransferComplete();
-
-        return saveDir; // 저장 디렉토리 반환 (실제 파일 경로는 알 수 없음)
-      }
-
-      logError('[NativeTransfer]', '파일 수신 실패:', error);
+      logError('[NativeTransfer]', '배치 파일 수신 실패:', error);
       this.emit('error', {
         message: `수신 실패: ${errorMessage}`,
       });
       this.emit('status', 'ERROR');
       throw error;
     }
+  }
+
+  /**
+   * 파일 수신 (Receiver)
+   * 
+   * @참고: 다중 파일 전송을 지원하기 위해 receiveBatchFiles가 추가됨
+   * 단일 파일 수신도 receiveBatchFiles로 처리됨
+   */
+  async receiveFile(saveDir: string, jobId: string): Promise<string> {
+    // 단일 파일 수신 요청을 배치 수신으로 위임
+    return this.receiveBatchFiles(saveDir, jobId);
   }
 
   /**

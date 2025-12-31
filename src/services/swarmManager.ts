@@ -27,7 +27,9 @@ import {
   HIGH_WATER_MARK,
   HEADER_SIZE,
   BATCH_SIZE_INITIAL,
+  CHUNK_SIZE_MAX,
 } from '../utils/constants';
+import { calculateCRC32 } from '../utils/checksum';
 import { EncryptionWorkerPool, ChunkProcessedPayload } from './workerPool';
 
 // 🚀 [성능 최적화] Backpressure 제어 상수 개선
@@ -638,6 +640,49 @@ export class SwarmManager {
     if (this.isTransferring && this.canRequestMoreChunks()) {
       this.requestMoreChunks();
     }
+  }
+
+  // ======================= Header Encoding Logic (Warp Protocol) =======================
+
+  /**
+   * Encodes raw data into the PonsWarp Protocol Packet
+   * Header Structure (22 bytes):
+   * [0-1] FileIndex (u16)
+   * [2-5] ChunkIndex (u32) - Calculated from offset
+   * [6-13] Offset (u64)
+   * [14-17] Data Length (u32)
+   * [18-21] CRC32 Checksum (u32)
+   */
+  private encodePacket(data: ArrayBuffer, fileIndex: number, offset: number): ArrayBuffer {
+    const dataArray = new Uint8Array(data);
+    const packetLength = HEADER_SIZE + dataArray.length;
+    
+    // Allocate new buffer for header + data
+    const buffer = new ArrayBuffer(packetLength);
+    const view = new DataView(buffer);
+    const packetArray = new Uint8Array(buffer);
+
+    // 1. File Index (u16)
+    view.setUint16(0, fileIndex, true);
+
+    // 2. Chunk Index (u32) - Approximate for debug/logic
+    const chunkIndex = Math.floor(offset / CHUNK_SIZE_MAX);
+    view.setUint32(2, chunkIndex, true);
+
+    // 3. Offset (u64) - Crucial for random access writing
+    view.setBigUint64(6, BigInt(offset), true);
+
+    // 4. Data Length (u32)
+    view.setUint32(14, dataArray.length, true);
+
+    // 5. Checksum (u32)
+    const checksum = calculateCRC32(dataArray);
+    view.setUint32(18, checksum, true);
+
+    // 6. Copy Data
+    packetArray.set(dataArray, HEADER_SIZE);
+
+    return buffer;
   }
 
   // ======================= 데이터 처리 =======================
@@ -1445,7 +1490,7 @@ export class SwarmManager {
       console.log('[SwarmManager] 📊 [DEBUG] Processing batch from worker:', {
         chunkCount: chunks.length,
         totalBatchSize: chunks.reduce(
-          (sum: number, chunk: ArrayBuffer) => sum + chunk.byteLength,
+          (sum: number, chunk: any) => sum + chunk.data?.byteLength || chunk.byteLength || 0,
           0
         ),
         connectedPeers: connectedPeers.length,
@@ -1478,24 +1523,36 @@ export class SwarmManager {
         return;
       }
 
-      // 모든 피어에게 브로드캐스트
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-
-        // 🚀 [성능 최적화] 디버그 로그 줄이기
-        if (i === 0 || i === chunks.length - 1) {
-          console.log(
-            '[SwarmManager] 📤 [DEBUG] Broadcasting chunk',
-            i + 1,
-            '/',
-            chunks.length,
-            'Size:',
-            chunk.byteLength
+      // Process & Broadcast Chunks with FileIndex Header
+      for (const chunkInfo of chunks) {
+        // chunkInfo = { fileIndex, offset, data, size } (from new worker)
+        // OR chunk = ArrayBuffer (legacy compatibility)
+        
+        let packet: ArrayBuffer;
+        
+        // Check if this is the new format with fileIndex
+        if (chunkInfo.fileIndex !== undefined && chunkInfo.data instanceof ArrayBuffer) {
+          // 🚀 [Warp Protocol] Encode packet with FileIndex header
+          packet = this.encodePacket(
+            chunkInfo.data,
+            chunkInfo.fileIndex,
+            chunkInfo.offset
           );
+          this.totalBytesSent += chunkInfo.size || chunkInfo.data.byteLength;
+        } else {
+          // Legacy format: chunk is already a packet
+          packet = chunkInfo;
+          this.totalBytesSent += packet.byteLength;
         }
 
-        const result = this.broadcastChunk(chunk);
-        this.totalBytesSent += chunk.byteLength;
+        // 🚀 [성능 최적화] 디버그 로그 줄이기
+        const chunkSize = packet.byteLength;
+        console.log(
+          '[SwarmManager] 📤 [DEBUG] Broadcasting packet, Size:',
+          chunkSize
+        );
+
+        const result = this.broadcastChunk(packet);
 
         // 실패한 피어 제거
         for (const failedPeerId of result.failedPeers) {

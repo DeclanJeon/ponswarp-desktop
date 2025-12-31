@@ -25,12 +25,13 @@ import { SwarmManager, MAX_DIRECT_PEERS } from '../services/swarmManager';
 import { createManifest, formatBytes } from '../utils/fileUtils';
 import { scanFiles, processInputFiles } from '../utils/fileScanner';
 import { motion, AnimatePresence } from 'framer-motion';
-import { AppMode } from '../types/types';
+import { AppMode, TransferManifest } from '../types/types';
 import { useTransferStore } from '../store/transferStore';
 import { nativeTransferService } from '../services/native-transfer';
 import { isWebRTCSupported } from '../services/singlePeerConnection';
 // Tauri API imports for native file selection
 import { invoke } from '@tauri-apps/api/core';
+import { join } from '@tauri-apps/api/path';
 
 interface SenderViewProps {
   onComplete?: () => void;
@@ -41,7 +42,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
 
   // 🆕 Native QUIC 전송 모드 여부
   const isNativeMode = useNativeTransfer || !isWebRTCSupported();
-  const [manifest, setManifest] = useState<any>(null);
+  const [manifest, setManifest] = useState<TransferManifest | null>(null);
   const [roomId, setRoomId] = useState<string | null>(null);
   const [shareLink, setShareLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -77,6 +78,14 @@ const SenderView: React.FC<SenderViewProps> = () => {
   // Input Refs
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+
+  // 🆕 [FIX] 전송 시작 여부 플래그 (Ref로 관리하여 즉시 반영)
+  const isTransferStartedRef = useRef(false);
+
+  // 🆕 [CRITICAL FIX] Ref들을 컴포넌트 상단에 정의하여 클로저 문제 해결
+  const selectedFilesRef = useRef<any[]>([]);
+  const manifestRef = useRef<TransferManifest | null>(null);
+  const [scannedFileList, setScannedFileList] = useState<any[]>([]);
 
   useEffect(() => {
     // 🆕 Native QUIC 모드일 때는 nativeTransferService 사용
@@ -198,6 +207,21 @@ const SenderView: React.FC<SenderViewProps> = () => {
         );
         setConnectedPeers(prev => [...prev, data.peerId]);
 
+        // 🆕 [FIX] 이미 전송이 시작되었다면 중복 실행 방지
+        if (isTransferStartedRef.current) {
+          console.warn('[SenderView] Transfer already started, ignoring duplicate connection event.');
+          return;
+        }
+
+        const files = selectedFilesRef.current;
+        if (!files || files.length === 0) {
+          console.error('[SenderView] No files selected to transfer.');
+          return;
+        }
+
+        // 전송 시작 플래그 설정
+        isTransferStartedRef.current = true;
+
         // 🆕 Receiver가 receiveFile()을 호출하고 accept_bi() 대기 상태가 될 때까지 기다림
         // 2초 대기 후 파일 전송 시작 (Receiver가 MATERIALIZE 버튼을 누를 시간)
         console.log('[SenderView] ⏳ Waiting 2s for receiver to be ready...');
@@ -206,55 +230,31 @@ const SenderView: React.FC<SenderViewProps> = () => {
 
         setStatus('TRANSFERRING');
 
-        // 🚀 파일 전송 시작
-        const files = selectedFilesRef.current;
-        if (files.length > 0) {
-          const file = files[0];
-          const jobId = `send-${Date.now()}`;
+        try {
+          console.log(`[SenderView] 🚀 Starting transfer of ${files.length} files...`);
 
-          console.log(
-            '[SenderView] 🚀 Starting file transfer to accepted peer:',
-            data.peerId
-          );
+          // 🆕 [CRITICAL FIX] Ref를 사용하여 최신 transferId 가져오기 (클로저 문제 해결)
+          const batchId = manifestRef.current?.transferId || manifest?.transferId || `fallback-${Date.now()}`;
+          
+          console.log(`[SenderView] Starting transfer with ID: ${batchId}`);
+          console.log(`[SenderView] manifestRef.current.transferId: ${manifestRef.current?.transferId}`);
+          console.log(`[SenderView] manifest.state.transferId: ${manifest?.transferId}`);
 
-          try {
-            // Native 파일 시스템 경로가 필요하므로 File 객체에서 path 추출
-            // Tauri에서는 File 객체에 path 속성이 있을 수 있음
-            const filePath = (file as any).path || file.name;
-
-            if (!filePath || filePath === file.name) {
-              console.error(
-                '[SenderView] ❌ Cannot get native file path. File:',
-                file
-              );
-              // 임시: 파일 경로를 알 수 없으면 에러 처리
-              // TODO: Tauri의 파일 다이얼로그로 선택한 파일은 path가 있음
-              console.error(
-                '[SenderView] Native file path not available. Please use file dialog to select files.'
-              );
-              setStatus('IDLE');
-              return;
-            }
-
-            const bytesSent =
-              await nativeTransferService.sendFileToAcceptedPeer(
-                data.peerId,
-                filePath,
-                jobId
-              );
-            console.log('[SenderView] ✅ File sent:', bytesSent, 'bytes');
-            setStatus('DONE');
-          } catch (error: any) {
-            console.error('[SenderView] ❌ File transfer failed:', error);
-            console.error(
-              `[SenderView] File transfer failed: ${error?.message || 'Unknown error'}`
-            );
-            setStatus('IDLE');
-          }
+          // 🚨 [임시 수정] send_stream_chunk API가 없으므로 배치 전송만 사용
+          // 향후 Rust 백엔드에 스트리밍 API가 구현되면 Zip 모드 활성화
+          console.log(`[SenderView] 📦 Starting batch transfer of ${files.length} file(s)...`);
+          setStatus('TRANSFERRING');
+          await nativeTransferService.startBatchTransfer(files, data.peerId, batchId);
+        } catch (error: any) {
+          console.error('[SenderView] Transfer failed:', error);
+          isTransferStartedRef.current = false; // 실패 시 플래그 해제
+          setStatus('IDLE');
         }
       });
 
       return () => {
+        // cleanup 시 플래그 초기화
+        isTransferStartedRef.current = false;
         nativeTransferService.cleanup();
       };
     }
@@ -479,21 +479,24 @@ const SenderView: React.FC<SenderViewProps> = () => {
     }
   };
 
-  // 🆕 Native 모드용 파일 참조 저장
-  const selectedFilesRef = useRef<File[]>([]);
-
   // 🆕 네이티브 파일 선택 핸들러 (Zero-Copy 최적화)
   const handleNativeFileSelect = async () => {
     try {
+      console.log('[SenderView] 📂 Opening file selection dialog...');
+
       // 1. Tauri 파일 다이얼로그 오픈 (Rust 백엔드에서 구현)
       const selected = await invoke('open_file_dialog', {
         multiple: true,
         directory: false,
       });
 
-      if (!selected) return;
+      if (!selected) {
+        console.log('[SenderView] User cancelled file selection');
+        return;
+      }
 
       const paths = Array.isArray(selected) ? selected : [selected];
+      console.log('[SenderView] Selected paths:', paths);
 
       // 2. 선택된 경로들의 메타데이터(크기 등) 조회하여 'File 유사 객체' 생성
       const filesWithMeta = await Promise.all(
@@ -503,14 +506,30 @@ const SenderView: React.FC<SenderViewProps> = () => {
           let modified = Date.now();
 
           try {
+            console.log('[SenderView] 🔍 Fetching metadata for:', path);
+
             // Rust 백엔드에서 파일 메타데이터 조회
             const meta = await invoke('get_file_metadata', { path });
-            size = (meta as any).size || 0;
-            if ((meta as any).modifiedAt)
-              modified = new Date((meta as any).modifiedAt).getTime();
-            console.log('[SenderView] 📊 File metadata:', { path, size, name });
+            console.log('[SenderView] 📊 Raw metadata response:', meta);
+            console.log('[SenderView] 📊 JSON stringify:', JSON.stringify(meta));
+
+            // 옵셔널 체이닝으로 안전하게 값 추출
+            const metaObj = meta as any;
+            size = metaObj?.size ?? 0;
+            if (metaObj?.modifiedAt || metaObj?.modified_at) {
+              modified = new Date(metaObj.modifiedAt || metaObj.modified_at).getTime();
+            }
+
+            console.log('[SenderView] 📊 File metadata:', { path, size, name, modified });
+
+            if (size === 0) {
+              console.error('[SenderView] ❌ File size is 0! Path:', path);
+            }
           } catch (e) {
-            console.warn('[SenderView] Metadata fetch failed for', path, e);
+            console.warn('[SenderView] ⚠️ Metadata fetch failed for', path, e);
+            console.error('[SenderView] Error details:', e);
+            // 실패 시 기본값 사용 (size = 0)
+            size = 0;
           }
 
           // 🚀 Zero-Copy 최적화: 더미 데이터 없이 경로만 포함한 객체 생성
@@ -518,6 +537,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
           return {
             file: null, // 🆕 Native 모드에서는 File 객체 불필요
             path: path, // Native 전송에 필수
+            nativePath: path, // 🆕 명시적 절대 경로
             nativeSize: size, // 실제 파일 크기
             name: name,
             lastModified: modified,
@@ -525,20 +545,32 @@ const SenderView: React.FC<SenderViewProps> = () => {
         })
       );
 
+      console.log('[SenderView] Files with metadata:', filesWithMeta.map(f => ({ name: f.name, size: f.nativeSize })));
+
       // 3. 기존 파일 처리 로직에 전달 (nativeSize 포함)
       if (filesWithMeta.length > 0) {
         // 🆕 nativeSize를 포함한 ScannedFile 형태로 변환
         const scannedFilesWithSize = filesWithMeta.map(item => ({
           file: item.file,
           path: item.path,
+          nativePath: item.nativePath || item.path, // 🆕 명시적 절대 경로
           nativeSize: item.nativeSize, // 실제 파일 크기
           name: item.name,
           lastModified: item.lastModified,
         }));
+
+        console.log('[SenderView] Calling processScannedFiles with', scannedFilesWithSize.length, 'files');
+
+        // 🆕 파일 목록 UI에 표시
+        setScannedFileList(scannedFilesWithSize);
         processScannedFiles(scannedFilesWithSize);
       }
     } catch (err) {
-      console.error('[SenderView] Native file selection failed:', err);
+      console.error('[SenderView] ❌ Native file selection failed:', err);
+      console.error('[SenderView] Error type:', typeof err);
+      console.error('[SenderView] Error details:', err instanceof Error ? err.message : String(err));
+      console.error('[SenderView] Stack:', err instanceof Error ? err.stack : 'N/A');
+
       // 권한 에러 등이 발생할 수 있으므로 사용자에게 알림
       console.error(
         '[SenderView] 파일 선택 중 오류가 발생했습니다. tauri.conf.json의 fs/dialog 권한을 확인해주세요.'
@@ -546,20 +578,89 @@ const SenderView: React.FC<SenderViewProps> = () => {
     }
   };
 
+  // 🆕 네이티브 폴더 선택 핸들러 (재귀적 스캔)
+  const handleNativeFolderSelect = async () => {
+    try {
+      console.log('[SenderView] 📁 Opening folder selection dialog...');
+
+      // 1. Tauri 폴더 다이얼로그 오픈
+      const selected = await invoke<string | null>('open_file_dialog', {
+        multiple: false,
+        directory: true,
+      });
+
+      if (!selected) return;
+
+      const folderPath = selected;
+      console.log('[SenderView] 📁 Selected folder root:', folderPath);
+
+      // 2. Rust 측 스캔
+      const scannedFiles = await invoke<any[]>('scan_folder', {
+        path: folderPath,
+      });
+
+      if (!scannedFiles || scannedFiles.length === 0) return;
+
+      // 3. [CRITICAL FIX] 경로 결합 로직 수정
+      const filesWithMeta = await Promise.all(
+        scannedFiles.map(async (item: any) => {
+          // item.path는 상대 경로 (예: "subfolder/file.txt")
+          // Tauri API를 통해 OS에 맞는 절대 경로 생성
+          const fullPath = await join(folderPath, item.path);
+
+          let size = item.size || 0;
+          const name = item.name || item.path.split(/[\\/]/).pop() || 'unknown';
+
+          // 🆕 [FIX] 더미 File 객체 생성 (크기 정보 포함)
+          const dummyFile = new File([new ArrayBuffer(size || 0)], name, {
+            type: 'application/octet-stream',
+            lastModified: Date.now(),
+          });
+
+          // 🆕 [FIX] 모든 경로 필드에 올바른 값 주입
+          (dummyFile as any).path = fullPath; // 절대 경로
+          (dummyFile as any).nativePath = fullPath; // 🆕 명시적 nativePath
+
+          return {
+            file: dummyFile,
+            path: fullPath, // 절대 경로 (전송 시 사용)
+            nativePath: fullPath, // 🆕 명시적 절대 경로 (전송 시 사용)
+            relativePath: item.path, // 상대 경로 (Manifest용)
+            nativeSize: size, // 실제 파일 크기
+            name: name,
+            lastModified: Date.now(),
+          };
+        })
+      );
+
+      // 🆕 파일 목록 UI에 표시
+      setScannedFileList(filesWithMeta);
+      processScannedFiles(filesWithMeta);
+    } catch (err) {
+      console.error('[SenderView] Folder selection failed:', err);
+    }
+  };
+
   const processScannedFiles = async (scannedFiles: any[]) => {
     if (scannedFiles.length === 0) return;
 
+    // [중요] 전송 세션 ID 생성 (Job ID 동기화의 핵심)
+    const transferId = `warp-${Date.now().toString(36)}`;
+
     // 🚀 Zero-Copy 최적화: Native 모드에서는 파일 경로와 메타데이터만 사용
-    let manifest, files;
+    let manifest: TransferManifest, files;
 
     if (isNativeMode) {
       // Native 모드: 파일 경로와 크기 정보로 manifest 생성
       // ScannedFile 타입에 맞게 더미 File 객체 생성 (Zero-Copy를 위해 내용은 비어있음)
       const nativeFiles = scannedFiles.map(item => {
+        // 파일명 추출 (path, name 중에서 우선 순위로 선택)
+        const fileName = item.name || item.path?.split(/[\\/]/).pop() || 'unknown';
+
         // 더미 File 객체 생성 (내용은 비어있음)
         const dummyFile = new File(
           [],
-          item.name || item.path.split(/[\\/]/).pop() || 'unknown',
+          fileName,
           {
             type: 'application/octet-stream',
             lastModified: item.lastModified || Date.now(),
@@ -571,27 +672,50 @@ const SenderView: React.FC<SenderViewProps> = () => {
 
         return {
           file: dummyFile, // ScannedFile 타입 호환을 위한 더미 File 객체
-          path: item.path, // Native 전송에 필수
+          path: item.relativePath || item.path, // Manifest에는 '상대 경로'를 넣어야 Receiver가 폴더 구조를 복원함
+          relativePath: item.relativePath || item.path?.split(/[\\/]/).pop() || fileName, // Zip 엔트리명용 상대 경로/파일명
+          nativePath: item.nativePath || item.path, // 🆕 [FIX] 실제 전송 시 사용할 절대 경로
           nativeSize: item.nativeSize, // 실제 파일 크기
+          name: fileName, // 파일명 명시적 저장
         };
       });
 
       // Native 모드용 manifest 생성 함수 호출
       const result = createManifest(nativeFiles);
-      manifest = result.manifest;
+
+      // [중요] createManifest가 생성한 transferId를 덮어써서 송수신자 동기화
+      manifest = {
+        ...result.manifest,
+        transferId: transferId,
+      } as TransferManifest;
+
       // Native 모드에서는 파일 객체 대신 경로 저장
       files = nativeFiles;
+
+      // [수정] 다중 파일이거나 폴더인 경우 Zip Streaming 모드 플래그 추가
+      if (files.length > 1 || manifest.isFolder) {
+        manifest.isZipStream = true;
+        // Receiver가 알 수 있도록 파일명을 .zip으로 변경 제안
+        manifest.rootName = (manifest.rootName || 'archive') + '.zip';
+        console.log('[SenderView] 🗜️ Zip Streaming mode enabled for multi-file/folder transfer');
+      }
 
       console.log('[SenderView] 🚀 Native mode - Zero-copy manifest created:', {
         isFolder: manifest.isFolder,
         totalFiles: manifest.totalFiles,
         totalSize: manifest.totalSize,
         rootName: manifest.rootName,
+        isZipStream: manifest.isZipStream,
+        transferId: manifest.transferId,
       });
     } else {
       // WebRTC 모드: 기존 방식대로 File 객체 사용
       const result = createManifest(scannedFiles);
-      manifest = result.manifest;
+      // [중요] WebRTC 모드에서도 transferId 포함 (송수신자 동기화)
+      manifest = {
+        ...result.manifest,
+        transferId: transferId,
+      } as TransferManifest;
       files = result.files;
 
       console.log('[SenderView] 🌐 WebRTC mode - Standard manifest created:', {
@@ -599,10 +723,12 @@ const SenderView: React.FC<SenderViewProps> = () => {
         totalFiles: manifest.totalFiles,
         totalSize: manifest.totalSize,
         rootName: manifest.rootName,
+        transferId: manifest.transferId,
       });
     }
 
     setManifest(manifest);
+    manifestRef.current = manifest; // 🆕 [CRITICAL] Ref에도 최신 manifest 저장 (클로저 문제 해결)
     selectedFilesRef.current = files; // Native 모드용 파일 저장
 
     // 여러 파일이면 ZIP 압축 준비 중 표시
@@ -756,8 +882,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
                     if (e.target !== e.currentTarget) return;
 
                     if (isNativeMode) {
-                      // TODO: Implement native folder selection
-                      handleNativeFileSelect();
+                      handleNativeFolderSelect();
                     } else {
                       folderInputRef.current?.click();
                     }
@@ -899,6 +1024,45 @@ const SenderView: React.FC<SenderViewProps> = () => {
               </div>
             </div>
 
+            {/* 🆕 파일 목록 표시 (폴더 스캔 시) */}
+            {scannedFileList.length > 0 && (
+              <div className="w-full bg-gray-900/40 p-4 rounded-xl border border-gray-700/50 max-h-48 overflow-y-auto">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <Folder className="w-4 h-4 text-cyan-400" />
+                    <span className="text-xs text-gray-300 font-bold">
+                      {scannedFileList.length} files selected
+                    </span>
+                  </div>
+                  <span className="text-xs text-gray-500 font-mono">
+                    {formatBytes(
+                      scannedFileList.reduce((sum, f) => sum + (f.nativeSize || 0), 0)
+                    )}
+                  </span>
+                </div>
+                <div className="space-y-1">
+                  {scannedFileList.slice(0, 10).map((file, i) => (
+                    <div key={i} className="flex items-center justify-between py-1 px-2 rounded bg-black/20 hover:bg-black/30 text-xs">
+                      <div className="flex items-center gap-2 flex-1 min-w-0">
+                        <FileIcon className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                        <span className="text-gray-300 truncate">
+                          {file.name || file.path.split('/').pop()}
+                        </span>
+                      </div>
+                      <span className="text-gray-500 font-mono">
+                        {formatBytes(file.nativeSize || 0)}
+                      </span>
+                    </div>
+                  ))}
+                  {scannedFileList.length > 10 && (
+                    <div className="text-xs text-gray-500 text-center py-1">
+                      ... and {scannedFileList.length - 10} more files
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Waiting Message / Countdown */}
             <div className="mt-6 text-center h-6">
               {readyCountdown !== null ? (
@@ -1022,7 +1186,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
                   Do NOT close this window.
                 </p>
                 <p>
-                  The receivers are currently saving the files. The connection
+                  The receivers are currently saving files. The connection
                   must remain open until they finish downloading.
                 </p>
               </div>
@@ -1046,7 +1210,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
             </h2>
             <p className="text-gray-400 mb-4">
               {completedPeers.length} receiver(s) have successfully downloaded
-              the files.
+              files.
             </p>
 
             {/* 피어 상태 표시 */}

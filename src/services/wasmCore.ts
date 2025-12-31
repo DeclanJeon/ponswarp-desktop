@@ -25,6 +25,7 @@ import init, {
   WasmReorderingBuffer,
   ZeroCopyPacketPool,
   ZeroCopyBatchPool,
+  Zip64Stream,
 } from 'pons-core-wasm';
 
 let wasmInitialized = false;
@@ -79,6 +80,8 @@ export {
   // Zero-Copy Packet Pool
   ZeroCopyPacketPool,
   ZeroCopyBatchPool,
+  // Zip64 Streaming
+  Zip64Stream,
 };
 
 // Type definitions for better TypeScript support
