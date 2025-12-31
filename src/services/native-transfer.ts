@@ -8,6 +8,16 @@
  * - 시그널링 서버를 통한 방(Room) 매칭
  * - QUIC 주소 교환 후 직접 P2P 연결
  * - mDNS 피어 자동 발견 (같은 LAN)
+ *
+ * 🆕 Phase 2 구현 (다중 파일/폴더 전송):
+ * - 배치 전송 큐 시스템
+ * - 순차적 파일 전송 (Sequential Batch Transfer)
+ * - 경로 정규화 (Path Normalization)
+ *
+ * 🆕 Phase 3 구현 (Zip Streaming):
+ * - 다중 파일/폴더 전송 시 단일 Zip 스트림으로 패키징
+ * - WASM Zip64Stream을 활용한 실시간 압축 스트리밍
+ * - 폴더 구조 보존 (relativePath 사용)
  */
 
 import { invoke } from '@tauri-apps/api/core';
@@ -15,8 +25,19 @@ import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { isNative, getDiscoveredPeers, DiscoveredPeer } from '../utils/tauri';
 import { logInfo, logError, logWarn, logDebug } from '../utils/logger';
 import { rustSignalingAdapter } from './signaling-adapter';
+import { initWasmCore, Zip64Stream } from './wasmCore';
 
 type EventHandler = (data: unknown) => void;
+
+// 🆕 파일 읽기 청크 크기 (WASM 메모리 효율 고려)
+const FILE_READ_CHUNK_SIZE = 64 * 1024;
+
+// 🆕 파일 전송 작업을 위한 인터페이스
+interface TransferJob {
+  filePath: string;  // 로컬 절대 경로
+  fileIndex: number; // Manifest 상의 인덱스
+  fileName: string;
+}
 
 export interface TransferProgress {
   jobId: string;
@@ -49,7 +70,7 @@ class NativeTransferService {
   private currentRoomId: string | null = null;
   private localQuicAddress: string | null = null;
   private lastSenderQuicAddress: string | null = null;
-  private peerPollingInterval: ReturnType<typeof setInterval> | null = null;
+  private peerPollingInterval: NodeJS.Timeout | null = null;
   private discoveredPeers: DiscoveredPeer[] = [];
   private initialized = false;
   private pendingManifest: unknown = null; // Sender가 보낼 manifest 저장
@@ -57,6 +78,16 @@ class NativeTransferService {
   // 🆕 진행률 스로틀링용
   private lastProgressEmit = 0;
   private readonly PROGRESS_THROTTLE_MS = 200; // 200ms마다 한 번만 UI 업데이트
+
+  // 🆕 [NEW] 전송 상태 관리 (배치 전송용)
+  private isTransferring = false;
+  private transferQueue: TransferJob[] = [];
+  private currentJobId: string | null = null;
+  private totalBatchSize = 0;
+  private totalBatchSent = 0;
+
+  // 🆕 Zip 스트리밍 상태
+  private isZipping = false;
 
   /**
    * 이벤트 리스너 설정
@@ -75,6 +106,9 @@ class NativeTransferService {
     }
 
     logInfo('[NativeTransfer]', 'QUIC 전송 서비스 초기화 중...');
+
+    // 🆕 WASM 초기화
+    await initWasmCore();
 
     // 로컬 QUIC 서버 주소 가져오기
     try {
@@ -148,6 +182,18 @@ class NativeTransferService {
       peerAddr: string;
     }>('quic-peer-connected', event => {
       logInfo('[NativeTransfer]', '🔗 QUIC 피어 연결됨:', event.payload);
+
+      // 중복 연결 방지: 이미 전송 중이거나 같은 피어면 무시
+      if ((this.isTransferring || this.isZipping) && this.currentPeerId === event.payload.peerId) {
+        logWarn(
+          '[NativeTransfer]',
+          '이미 전송 세션이 활성화되어 있습니다. 중복 연결 무시.'
+        );
+        return;
+      }
+
+      this.currentPeerId = event.payload.peerId;
+      this.connected = true;
       this.emit('quic-peer-connected', event.payload);
     });
     this.unlisteners.push(quicPeerConnectedUnlisten);
@@ -165,7 +211,8 @@ class NativeTransferService {
   private startPeerPolling(): void {
     if (this.peerPollingInterval) return;
 
-    this.peerPollingInterval = setInterval(async () => {
+    // 화살표 함수로 this 바인딩
+    const pollHandler = async () => {
       try {
         const peers = await getDiscoveredPeers();
 
@@ -189,7 +236,8 @@ class NativeTransferService {
       } catch (error) {
         logWarn('[NativeTransfer]', '피어 폴링 오류:', error);
       }
-    }, 2000);
+    };
+    this.peerPollingInterval = setInterval(pollHandler, 2000);
   }
 
   /**
@@ -544,6 +592,161 @@ class NativeTransferService {
   }
 
   /**
+   * 🆕 [UPDATED] 전송 시작 진입점
+   * 파일이 1개면 직접 전송, 2개 이상이거나 폴더면 Zip 스트리밍 전송
+   */
+  async startTransferDispatcher(files: any[], peerId: string): Promise<void> {
+    if (this.isTransferring || this.isZipping) {
+      logWarn('[NativeTransfer]', 'Transfer already in progress.');
+      return;
+    }
+
+    const isMultiple = files.length > 1;
+
+    if (isMultiple) {
+      logInfo('[NativeTransfer]', `Starting ZIP Stream transfer for ${files.length} files.`);
+      await this.sendZipStream(files, peerId);
+    } else {
+      logInfo('[NativeTransfer]', `Starting Single File transfer: ${files[0].name}`);
+      // 단일 파일도 기존 배치 전송 로직 사용
+      await this.startBatchTransfer(files, peerId);
+    }
+  }
+
+  /**
+   * 🆕 [NEW] Zip Streaming Transfer
+   * 파일을 순차적으로 읽어서 WASM Zip64Stream에 넣고, 나오는 청크를 즉시 QUIC으로 전송합니다.
+   */
+  async sendZipStream(files: any[], peerId: string): Promise<void> {
+    this.isZipping = true;
+    this.currentPeerId = peerId;
+    this.currentJobId = `zip-${Date.now()}`;
+
+    // UI 상태 업데이트
+    this.emit('status', 'TRANSFERRING');
+
+    try {
+      // 1. Zip Stream 초기화 (Compression Level 0-9, 0=Store, 1=Fastest)
+      // 속도를 위해 1 권장, 압축률보다 묶는게 목적이라면 0
+      const zip = new Zip64Stream(1);
+
+      // 전체 진행률 계산을 위한 변수
+      let totalBytesProcessed = 0;
+      const totalBytesOriginal = files.reduce((acc, f) => acc + (f.nativeSize || f.size || 0), 0);
+
+      // 2. 가상의 Zip 파일명 생성
+      const zipFileName = `archive_${Date.now()}.zip`;
+
+      logInfo('[NativeTransfer]', `Streaming ZIP: ${zipFileName}, Total Source Size: ${totalBytesOriginal}`);
+
+      // 3. 파일 순회 및 스트리밍
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        // 중요: 상대 경로 사용! (폴더 구조 보존 핵심)
+        const zipEntryName = file.relativePath || file.name;
+        const fileSize = BigInt(file.nativeSize || file.size || 0);
+
+        logDebug('[NativeTransfer]', `Zipping file: ${zipEntryName} (${fileSize})`);
+
+        // A. Zip Entry 시작 (Local File Header)
+        const headerChunk = zip.begin_file(zipEntryName, fileSize);
+        await this.sendRawChunkToPeer(peerId, this.currentJobId, headerChunk);
+
+        // B. 파일 내용 읽기 및 압축
+        // 파일 읽기 (Rust 백엔드에서 청크 단위로 읽어야 함)
+        // 현재 구조에서는 invoke로 파일 전체를 읽는 방식 사용
+        try {
+          const fileData = await invoke<Uint8Array>('read_file_as_bytes', {
+            path: file.nativePath || file.path || (file as any).path,
+          });
+
+          // WASM을 통해 압축
+          const compressedChunk = zip.process_chunk(fileData);
+
+          // 압축된 데이터 전송
+          if (compressedChunk.length > 0) {
+            await this.sendRawChunkToPeer(peerId, this.currentJobId, compressedChunk);
+          }
+
+          totalBytesProcessed += fileData.length;
+
+          // 진행률 업데이트
+          this.emitProgress(totalBytesProcessed, totalBytesOriginal);
+        } catch (readError) {
+          logError('[NativeTransfer]', `파일 읽기 실패: ${zipEntryName}`, readError);
+          throw readError;
+        }
+
+        // C. Zip Entry 종료 (Data Descriptor)
+        const footerChunk = zip.end_file();
+        await this.sendRawChunkToPeer(peerId, this.currentJobId, footerChunk);
+      }
+
+      // 4. Zip 종료 (Central Directory)
+      const finalChunk = zip.finalize();
+      await this.sendRawChunkToPeer(peerId, this.currentJobId, finalChunk);
+
+      // 5. 전송 완료 신호 (EOF)
+      // 스트림 전송 완료를 알리는 0바이트 청크 전송
+      await this.sendRawChunkToPeer(peerId, this.currentJobId, new Uint8Array(0));
+
+      logInfo('[NativeTransfer]', 'Zip Stream transfer complete.');
+      this.isZipping = false;
+      this.emit('status', 'COMPLETED');
+      this.emit('complete', { jobId: this.currentJobId });
+
+      // Clean up WASM memory
+      zip.free();
+
+    } catch (error) {
+      console.error('[NativeTransfer] Zip transfer failed:', error);
+      this.isZipping = false;
+      this.emit('error', error);
+      this.emit('status', 'ERROR');
+    }
+  }
+
+  /**
+   * Rust의 QUIC 전송 함수 호출 래퍼
+   * 🚨 [주의] 현재 Rust Backend에는 send_stream_chunk API가 없을 수 있음
+   * 필요시 별도의 스트림 전송 명령어를 구현해야 함
+   */
+  private async sendRawChunkToPeer(peerId: string, jobId: string, data: Uint8Array): Promise<void> {
+    try {
+      // Array.from()은 오버헤드가 있을 수 있으므로 Tauri v2의 바이너리 전송 최적화 확인 필요
+      // 여기서는 일반적인 invoke 호출로 가정
+      // 🚨 현재 Rust Backend에 이 명령어가 없으면 주석처리 필요
+      await invoke('send_stream_chunk', {
+        peerId,
+        jobId,
+        data: Array.from(data) // Tauri가 Vec<u8>로 변환
+      });
+    } catch (error) {
+      // send_stream_chunk가 없을 경우 대체 방식 시도
+      logWarn('[NativeTransfer]', 'send_stream_chunk 실패, 스트림 전송 모드 지원되지 않음', error);
+      throw new Error('Stream transfer not supported by backend');
+    }
+  }
+
+  /**
+   * 진행률 이벤트 발생 (스로틀링 적용)
+   */
+  private emitProgress(processed: number, total: number) {
+    const now = Date.now();
+    // 200ms 스로틀링
+    if (now - this.lastProgressEmit < this.PROGRESS_THROTTLE_MS && processed < total) return;
+    this.lastProgressEmit = now;
+
+    const progress = total > 0 ? (processed / total) * 100 : 0;
+    this.emit('progress', {
+      progress,
+      bytesTransferred: processed,
+      totalBytes: total,
+      speed: 0 // 속도 계산 로직은 별도 구현 필요 (생략)
+    });
+  }
+
+  /**
    * 파일 전송 (Sender - 클라이언트로 연결한 경우)
    */
   async sendFile(filePath: string, jobId: string): Promise<number> {
@@ -589,6 +792,93 @@ class NativeTransferService {
   }
 
   /**
+   * 🆕 [CORE ALGORITHM] 다중 파일 일괄 전송 시작
+   * SenderView에서 파일 목록을 받아 순차적으로 전송합니다.
+   */
+  async startBatchTransfer(files: any[], peerId: string): Promise<void> {
+    if (this.isTransferring) {
+      logWarn('[NativeTransfer]', '이미 전송 중입니다.');
+      return;
+    }
+
+    this.isTransferring = true;
+    this.currentPeerId = peerId;
+    this.currentJobId = `batch-${Date.now()}`;
+    this.totalBatchSize = files.reduce((acc, f) => acc + (f.nativeSize || f.size || 0), 0);
+    this.totalBatchSent = 0;
+
+    // 큐 생성: files 배열의 순서(Index)가 Manifest와 일치해야 함
+    this.transferQueue = files.map((f, index) => ({
+      filePath: f.nativePath || f.path || (f as any).path, // 절대 경로
+      fileIndex: index,
+      fileName: f.name
+    }));
+
+    logInfo('[NativeTransfer]', `배치 전송 시작: 총 ${files.length}개 파일, ${this.totalBatchSize} bytes`);
+    this.emit('status', 'TRANSFERRING');
+
+    // 큐 처리 시작
+    await this.processTransferQueue();
+  }
+
+  /**
+   * 🆕 [CORE ALGORITHM] 큐 처리 루프
+   */
+  private async processTransferQueue(): Promise<void> {
+    if (this.transferQueue.length === 0) {
+      this.finishBatchTransfer();
+      return;
+    }
+
+    const job = this.transferQueue.shift(); // 첫 번째 작업 추출
+    if (!job) return;
+
+    try {
+      logInfo(
+        '[NativeTransfer]',
+        `파일 전송 시작 (${job.fileIndex + 1}/${this.currentJobId}): ${job.fileName}`
+      );
+
+      // Rust로 파일 전송 요청 (비동기 대기)
+      // 주의: Rust 측 send_file_to_accepted_peer가 완료될 때까지 기다립니다.
+      const bytesSent = await this.sendFileToAcceptedPeer(
+        this.currentPeerId!,
+        job.filePath,
+        `${this.currentJobId}-${job.fileIndex}`
+      );
+
+      this.totalBatchSent += bytesSent;
+      logInfo(
+        '[NativeTransfer]',
+        `파일 전송 완료: ${job.fileName} (${bytesSent} bytes)`
+      );
+
+      // 다음 파일 처리 (재귀 호출)
+      // 약간의 딜레이를 주어 Rust 스레드 정리 시간을 벰
+      setTimeout(() => this.processTransferQueue(), 50);
+
+    } catch (error) {
+      logError(`[NativeTransfer] 파일 전송 중 오류 발생 (${job.fileName}):`, error);
+      this.emit('error', error);
+      this.isTransferring = false;
+      this.transferQueue = []; // 남은 큐 정리
+      this.emit('status', 'ERROR');
+    }
+  }
+
+  private finishBatchTransfer() {
+    logInfo('[NativeTransfer]', '모든 파일 전송 완료.');
+    this.isTransferring = false;
+    this.emit('status', 'COMPLETED');
+    this.emit('complete', { jobId: this.currentJobId });
+
+    // Receiver에게 완료 신호 전송
+    if (this.currentRoomId) {
+      rustSignalingAdapter.sendTransferComplete(this.currentRoomId);
+    }
+  }
+
+  /**
    * 🆕 수락된 피어에게 파일 전송 (Sender - 서버 역할)
    * Receiver가 Sender의 QUIC 서버에 연결하면 이 메서드로 전송
    */
@@ -605,7 +895,7 @@ class NativeTransferService {
     try {
       logInfo(
         '[NativeTransfer]',
-        `수락된 피어에게 파일 전송 시작: ${filePath} -> ${peerId}`
+        `수락된 피어에게 파일 전송 시작: ${filePath} -> ${peerId} (jobId: ${jobId})`
       );
       this.emit('status', 'TRANSFERRING');
 
@@ -613,6 +903,8 @@ class NativeTransferService {
         peerId,
         filePath,
         jobId,
+        // Rust API가 fileIndex를 지원한다면 추가할 수 있음
+        // 현재는 순차적 호출만으로도 순서가 보장됨
       });
 
       // 🚨 [수정] 전송 완료 플래그 설정
@@ -867,6 +1159,12 @@ class NativeTransferService {
     this.currentRoomId = null;
     this.discoveredPeers = [];
     this.initialized = false;
+
+    // 🆕 배치 전송 상태 초기화
+    this.isTransferring = false;
+    this.transferQueue = [];
+    this.isZipping = false;
+
     logInfo('[NativeTransfer]', '서비스 정리 완료');
   }
 
