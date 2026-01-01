@@ -59,17 +59,17 @@ const ReceiverView: React.FC = () => {
   // 🚨 [추가] 송신자 응답 대기 상태 변수
   const [isWaitingForSender, setIsWaitingForSender] = useState(false);
 
-  // 🚀 [Multi-Receiver] 대기열 상태
+  // � [추가] 연결 타임아웃 Ref
+  const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // �🚀 [Multi-Receiver] 대기열 상태
   const [queuePosition, setQueuePosition] = useState<number>(0);
   const [queueMessage, setQueueMessage] = useState<string>('');
 
   // 🚀 [Optimistic ACK] 완료 신호 즉시 처리를 위한 상태
   const [optimisticComplete, setOptimisticComplete] = useState(false);
 
-  // � [추가] 연결 타임아웃 관리용 Ref
-  const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
-  // 🚨 [핵심 수정 1] status의 최신 값을 추적하기 위한 Ref 생성
+  // 🆕 [핵심 수정 1] status의 최신 값을 추적하기 위한 Ref 생성
   // setTimeout과 같은 비동기 클로저 안에서도 항상 최신 상태를 읽을 수 있게 함
   const statusRef = useRef(status);
   useEffect(() => {
@@ -196,7 +196,7 @@ const ReceiverView: React.FC = () => {
     if (msg.includes('Room full')) {
       // 🚨 [핵심 수정] 방이 꽉 찼을 때 ERROR가 아닌 ROOM_FULL 상태로 전환
       setErrorMsg(
-        'Room is currently occupied. Please wait for the current transfer to complete.'
+        'Room is currently occupied. Please wait for current transfer to complete.'
       );
       setStatus('ROOM_FULL');
       return;
@@ -298,7 +298,7 @@ const ReceiverView: React.FC = () => {
       clearTimeout(connectionTimeoutRef.current);
     setIsWaitingForSender(false);
     setErrorMsg(
-      'Transfer has already started. Please wait for it to complete or refresh to join the next transfer.'
+      'Transfer has already started. Please wait for it to complete or refresh to join next transfer.'
     );
     setStatus('ERROR');
   }, []);
@@ -558,40 +558,37 @@ const ReceiverView: React.FC = () => {
         console.log(
           '[ReceiverView] 🚀 Native QUIC mode - Starting file receive'
         );
-        console.log(
-          '[ReceiverView] Manifest:',
-          manifest.totalFiles,
-          'files,',
-          (manifest.totalSize / (1024 * 1024)).toFixed(2),
-          'MB'
-        );
+        console.log('[ReceiverView] Manifest:', {
+          totalFiles: manifest.totalFiles,
+          totalSize: (manifest.totalSize / (1024 * 1024)).toFixed(2) + ' MB',
+          isZipStream: (manifest as any).isZipStream,
+        });
 
-        // 2. [수정] Job ID 설정
-        // Sender가 Manifest에 담아 보낸 transferId를 사용해야 함.
-        // 만약 없다면(구버전 호환) timestamp 사용하지만 실패 확률 높음.
+        // Transfer ID 확인
         const transferId = (manifest as any).transferId;
-        
+
         if (!transferId) {
-          console.error('[ReceiverView] Critical: No transferId in manifest. Update Sender.');
-          setErrorMsg("Protocol mismatch: Missing Transfer ID");
+          console.error('[ReceiverView] Critical: No transferId in manifest.');
+          setErrorMsg('Protocol mismatch: Missing Transfer ID');
           setStatus('ERROR');
           setIsWaitingForSender(false);
           return;
         }
 
-        console.log('[ReceiverView] Using Transfer ID from manifest:', transferId);
+        console.log(
+          '[ReceiverView] Using Transfer ID from manifest:',
+          transferId
+        );
 
-        //1. 데스크탑: Native File Dialog 사용 (메모리 제한 없음)
+        // 저장 디렉토리 선택
         let saveDir: string | null = null;
         try {
           const { invoke } = await import('@tauri-apps/api/core');
-          // 🚨 [수정] open_file_dialog는 항상 배열을 반환하므로 첫 번째 요소를 추출해야 함
           const selection = await invoke<string[] | null>('open_file_dialog', {
             directory: true,
             multiple: false,
           });
           saveDir = selection && selection.length > 0 ? selection[0] : null;
-          console.log('[ReceiverView] Using selected directory:', saveDir);
         } catch (pathError) {
           console.error(
             '[ReceiverView] Failed to open file dialog:',
@@ -612,11 +609,6 @@ const ReceiverView: React.FC = () => {
 
         console.log('[ReceiverView] Save directory selected:', saveDir);
 
-        // 3. Rust 백엔드에 다운로드 작업 위임 (Web Worker 우회)
-        // JS 스레드는 단순히 진행률 이벤트만 수신하므로 UI 멈춤 현상 완전 제거
-        // Manifest에 있는 transferId를 사용하여 수신 요청
-        const jobId = transferId;
-
         // 진행률 초기화
         setProgressData({
           progress: 0,
@@ -625,26 +617,47 @@ const ReceiverView: React.FC = () => {
           totalBytes: manifest.totalSize || 0,
         });
 
-        // 비동기로 파일 수신 시작 (await 하지 않음 - 진행률 이벤트로 UI 업데이트)
-        // receiveBatchFiles를 직접 호출하여 모든 파일을 순차적으로 수신
-        nativeTransferService
-          .receiveBatchFiles(saveDir as string, jobId)
-          .then(savedPath => {
-            console.log('[ReceiverView] ✅ File received:', savedPath);
-            setStatus('DONE');
-            setIsWaitingForSender(false);
-          })
-          .catch((recvError: any) => {
-            console.error('[ReceiverView] Native receive failed:', recvError);
-            // 정상 종료인데 에러로 잡히는 경우 필터링 (옵션)
-            if (recvError.message?.includes('Batch receive finished')) {
+        // 🆕 Zip 스트리밍 모드 분기
+        const isZipStream = (manifest as any).isZipStream === true;
+
+        if (isZipStream) {
+          console.log('[ReceiverView] 🗜️ Zip 스트리밍 수신 모드 활성화');
+
+          // Zip 스트리밍 수신
+          nativeTransferService
+            .receiveZipStreamTransfer(saveDir, transferId)
+            .then(savedPath => {
+              console.log('[ReceiverView] ✅ Zip 파일 저장 완료:', savedPath);
               setStatus('DONE');
-            } else {
-              setErrorMsg(recvError.message || 'File receive failed');
+              setIsWaitingForSender(false);
+            })
+            .catch((zipError: any) => {
+              console.error('[ReceiverView] Zip 수신 실패:', zipError);
+              setErrorMsg(zipError.message || 'Zip receive failed');
               setStatus('ERROR');
-            }
-            setIsWaitingForSender(false);
-          });
+              setIsWaitingForSender(false);
+            });
+        } else {
+          // 기존 배치 수신 로직
+          nativeTransferService
+            .receiveBatchFiles(saveDir, transferId)
+            .then(savedPath => {
+              console.log('[ReceiverView] ✅ File received:', savedPath);
+              setStatus('DONE');
+              setIsWaitingForSender(false);
+            })
+            .catch((recvError: any) => {
+              console.error('[ReceiverView] Native receive failed:', recvError);
+              // 정상 종료인데 에러로 잡히는 경우 필터링
+              if (recvError.message?.includes('Batch receive finished')) {
+                setStatus('DONE');
+              } else {
+                setErrorMsg(recvError.message || 'File receive failed');
+                setStatus('ERROR');
+              }
+              setIsWaitingForSender(false);
+            });
+        }
 
         // UI는 RECEIVING 상태로 유지하고 진행률 이벤트를 기다림
         console.log('[ReceiverView] 📥 Waiting for file transfer...');
@@ -996,7 +1009,7 @@ const ReceiverView: React.FC = () => {
               <p className="text-gray-300 mb-6">{errorMsg}</p>
               <button
                 onClick={() => window.location.reload()}
-                className="bg-white/10 border border-white/20 text-white px-6 py-3 rounded-full hover:bg-white/20 flex items-center gap-2 mx-auto transition-all"
+                className="bg-white/10 border border-white/20 text-white px-6 py-3 rounded-full hover:bg-white/20 transition-all flex items-center gap-2 mx-auto transition-all"
               >
                 <RefreshCw size={18} /> Retry
               </button>

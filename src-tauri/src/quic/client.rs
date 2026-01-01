@@ -58,7 +58,7 @@ impl QuicClient {
             .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
             .with_no_client_auth();
         
-        client_crypto.alpn_protocols = vec![b"gridwarp".to_vec()];
+        client_crypto.alpn_protocols = vec![b"ponswarp".to_vec()];
         
         let mut client_config = ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?

@@ -37,7 +37,7 @@ class NativeSignalingService {
 
     console.log('[NativeSignaling] QUIC P2P 시그널링 초기화 중...');
 
-    this.nodeId = `gridwarp-${Date.now().toString(36)}`;
+    this.nodeId = `ponswarp-${Date.now().toString(36)}`;
     this.connected = true;
 
     // 🆕 Rust 백엔드에서 오는 시그널링 이벤트를 수신 대기

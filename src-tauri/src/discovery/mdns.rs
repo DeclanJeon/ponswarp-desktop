@@ -9,7 +9,7 @@ use tracing::{info, warn};
 
 use crate::protocol::PeerCapabilities;
 
-const SERVICE_TYPE: &str = "_gridwarp._tcp.local.";
+const SERVICE_TYPE: &str = "_ponswarp._tcp.local.";
 
 #[derive(Debug, Clone)]
 pub struct PeerNode {

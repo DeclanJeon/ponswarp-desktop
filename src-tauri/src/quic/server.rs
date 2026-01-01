@@ -139,7 +139,7 @@ impl QuicServer {
     }
     
     fn configure_server(&self) -> Result<ServerConfig> {
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into(), "gridwarp.local".into()])?;
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into(), "ponswarp.local".into()])?;
         let cert_der = cert.cert.der().to_vec();
         let priv_key = cert.key_pair.serialize_der();
         
@@ -150,7 +150,7 @@ impl QuicServer {
             .with_no_client_auth()
             .with_single_cert(cert_chain, priv_key)?;
         
-        server_crypto.alpn_protocols = vec![b"gridwarp".to_vec()];
+        server_crypto.alpn_protocols = vec![b"ponswarp".to_vec()];
         
         let mut server_config = ServerConfig::with_crypto(Arc::new(
             quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?

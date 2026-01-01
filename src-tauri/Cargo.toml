@@ -1,15 +1,15 @@
 [package]
-name = "gridwarp"
+name = "ponswarp"
 version = "0.1.0"
-description = "GridWarp Enterprise - High-speed P2P file transfer"
-authors = ["GridWarp Team"]
+description = "PonsWarp Enterprise - High-speed P2P file transfer"
+authors = ["PonsWarp Team"]
 license = "MIT"
-repository = "https://github.com/gridwarp/gridwarp"
+repository = "https://github.com/ponswarp/ponswarp"
 edition = "2021"
 rust-version = "1.77.2"
 
 [lib]
-name = "gridwarp_lib"
+name = "ponswarp_lib"
 crate-type = ["staticlib", "rlib"]
 
 [build-dependencies]
@@ -57,6 +57,9 @@ libc = "0.2"
 
 # Zero-Copy I/O
 memmap2 = "0.9"
+
+# 🆕 Zip 처리
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
 
 # Grid Protocol (Phase 2)
 sha2 = "0.10"

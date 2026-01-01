@@ -148,7 +148,7 @@ export async function initializeNativeServices(): Promise<{
   const quicAddress = await startQuicServer(0);
 
   if (quicAddress) {
-    const nodeId = `gridwarp-${Date.now().toString(36)}`;
+    const nodeId = `ponswarp-${Date.now().toString(36)}`;
     const port = parseInt(quicAddress.split(':').pop() || '0');
     await startDiscovery(nodeId, port);
   }

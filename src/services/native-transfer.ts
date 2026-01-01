@@ -465,23 +465,176 @@ class NativeTransferService {
   }
 
   /**
-   * 피어 참여 핸들러 (Sender 측)
+   * 🆕 [UPDATED] 전송 시작 진입점 (자동 분기)
+   *
+   * - 단일 파일: 기존 배치 전송
+   * - 다중 파일/폴더: Zip 스트리밍 전송
    */
-  private async handlePeerJoined(data: unknown): Promise<void> {
-    // payload는 {socketId: string, roomId: string} 형태로 전달됨
-    const payload = data as { socketId?: string; roomId?: string };
-    const peerId = payload?.socketId;
-    if (!peerId) {
-      logWarn('[NativeTransfer]', '피어 ID가 없음:', data);
+  async startTransferDispatcher(
+    files: any[],
+    peerId: string,
+    jobId?: string
+  ): Promise<void> {
+    if (this.isTransferring || this.isZipping) {
+      logWarn('[NativeTransfer]', 'Transfer already in progress.');
       return;
     }
 
-    logInfo('[NativeTransfer]', `피어 참여: ${peerId}`);
+    if (files.length === 0) {
+      logWarn('[NativeTransfer]', 'No files to transfer.');
+      return;
+    }
+
+    const transferId = jobId || `warp-${Date.now().toString(36)}`;
+
+    // 🆕 자동 분기: 다중 파일이면 Zip 스트리밍
+    if (files.length > 1) {
+      logInfo(
+        '[NativeTransfer]',
+        `🗜️ 다중 파일 감지 (${files.length}개) - Zip 스트리밍 모드 활성화`
+      );
+
+      this.isZipping = true;
+      this.currentJobId = transferId;
+      this.emit('status', 'TRANSFERRING');
+
+      try {
+        await this.sendZipStreamTransfer(files, peerId, transferId, 1);
+
+        this.isZipping = false;
+        this.emit('status', 'COMPLETED');
+        this.emit('complete', { jobId: transferId });
+      } catch (error) {
+        this.isZipping = false;
+        this.emit('error', { message: `Zip 전송 실패: ${error}` });
+        this.emit('status', 'ERROR');
+      }
+    } else {
+      // 단일 파일: 기존 배치 전송 사용
+      logInfo('[NativeTransfer]', '📄 단일 파일 - 기존 전송 모드');
+      await this.startBatchTransfer(files, peerId, transferId);
+    }
+  }
+
+  /**
+   * 🆕 [CORE] Zip 스트리밍 전송 (다중 파일/폴더용)
+   *
+   * Rust 백엔드에서 파일을 실시간으로 Zip 압축하며 전송합니다.
+   * JavaScript 메모리를 거치지 않아 대용량 파일에 적합합니다.
+   */
+  async sendZipStreamTransfer(
+    files: any[],
+    peerId: string,
+    jobId: string,
+    compressionLevel: number = 1
+  ): Promise<number> {
+    if (!this.connected || !peerId) {
+      throw new Error('피어에 연결되어 있지 않습니다.');
+    }
+
+    logInfo(
+      '[NativeTransfer]',
+      `🗜️ Zip 스트리밍 전송 시작: ${files.length} 파일`
+    );
+
+    try {
+      // Rust 백엔드 호출
+      const bytesSent = await invoke<number>('send_zip_stream_transfer', {
+        peerId,
+        files: files.map(f => ({
+          nativePath: f.nativePath || f.path,
+          relativePath:
+            f.relativePath || f.name || f.path?.split(/[\\/]/).pop(),
+          nativeSize: f.nativeSize || f.size || 0,
+          name: f.name,
+        })),
+        jobId,
+        compressionLevel,
+      });
+
+      logInfo('[NativeTransfer]', `✅ Zip 스트리밍 완료: ${bytesSent} bytes`);
+      return bytesSent;
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      logError('[NativeTransfer]', '❌ Zip 스트리밍 실패:', errorMessage);
+      throw error;
+    }
+  }
+
+  /**
+   * 🆕 [CORE] Zip 스트리밍 수신 (Receiver)
+   */
+  async receiveZipStreamTransfer(
+    saveDir: string,
+    jobId: string
+  ): Promise<string> {
+    if (!this.connected || !this.currentPeerId) {
+      throw new Error('피어에 연결되어 있지 않습니다.');
+    }
+
+    logInfo('[NativeTransfer]', `📥 Zip 스트리밍 수신 대기: ${saveDir}`);
+
+    try {
+      const savedPath = await invoke<string>('receive_zip_stream_transfer', {
+        peerId: this.currentPeerId,
+        saveDir,
+        jobId,
+      });
+
+      logInfo('[NativeTransfer]', `✅ Zip 파일 저장 완료: ${savedPath}`);
+      return savedPath;
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      logError('[NativeTransfer]', '❌ Zip 스트리밍 수신 실패:', errorMessage);
+      throw error;
+    }
+  }
+
+  /**
+   * 🆕 Zip 파일 압축 해제
+   */
+  async extractZipFile(zipPath: string, outputDir: string): Promise<string[]> {
+    logInfo('[NativeTransfer]', `📂 Zip 압축 해제: ${zipPath} -> ${outputDir}`);
+
+    try {
+      const extractedFiles = await invoke<string[]>('extract_zip_file', {
+        zipPath,
+        outputDir,
+      });
+
+      logInfo(
+        '[NativeTransfer]',
+        `✅ ${extractedFiles.length} 파일 압축 해제 완료`
+      );
+      return extractedFiles;
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      logError('[NativeTransfer]', '❌ Zip 압축 해제 실패:', errorMessage);
+      throw error;
+    }
+  }
+
+  /**
+   * 피어 입장 핸들러 (Sender 측)
+   */
+  private handlePeerJoined(data: unknown): void {
+    const payload = data as { socketId?: string; id?: string; peerId?: string };
+    const peerId = payload?.socketId || payload?.id || payload?.peerId;
+
+    if (!peerId) {
+      logWarn('[NativeTransfer]', '피어 입장 이벤트에 ID가 없음:', data);
+      return;
+    }
+
+    logInfo('[NativeTransfer]', `피어 입장: ${peerId}`);
     this.emit('peer-joined', { peerId });
 
-    // 🆕 Manifest 전송 (시그널링 서버 통해)
+    // 대기 중인 Manifest가 있으면 전송
     if (this.pendingManifest && this.currentRoomId) {
-      logInfo('[NativeTransfer]', `Manifest 전송 중: ${peerId}`);
+      logInfo('[NativeTransfer]', `새 피어(${peerId})에게 Manifest 전송`);
       rustSignalingAdapter.sendManifest(
         this.currentRoomId,
         this.pendingManifest,
@@ -595,34 +748,9 @@ class NativeTransferService {
   }
 
   /**
-   * 🆕 [UPDATED] 전송 시작 진입점
-   * 다중 파일 및 단일 파일 전송을 배치 전송으로 처리
-   *
-   * @참고: Zip Streaming은 백엔드(send_stream_chunk) 미구현으로 인해 비활성화됨
-   * 대신 순차적 배치 전송을 사용하여 다중 파일 전송을 지원함
-   */
-  async startTransferDispatcher(files: any[], peerId: string): Promise<void> {
-    if (this.isTransferring || this.isZipping) {
-      logWarn('[NativeTransfer]', 'Transfer already in progress.');
-      return;
-    }
-
-    if (files.length === 0) {
-      logWarn('[NativeTransfer]', 'No files to transfer.');
-      return;
-    }
-
-    logInfo(
-      '[NativeTransfer]',
-      `Starting batch transfer for ${files.length} file(s).`
-    );
-    await this.startBatchTransfer(files, peerId);
-  }
-
-  /**
    * 🆕 [OPTIMIZED] Zip Streaming Transfer
    * 파일을 순차적으로 읽어서 WASM Zip64Stream에 넣고, 나오는 청크를 즉시 QUIC으로 전송합니다.
-   * 
+   *
    * 개선 사항:
    * - 진행률 계산 정확도 향상 (원본 파일 크기 기반)
    * - 에러 처리 강화 (연결 끊김 시 안전하게 정리)
@@ -630,7 +758,10 @@ class NativeTransferService {
    */
   async sendZipStream(files: any[], peerId: string): Promise<void> {
     if (this.isZipping || this.isTransferring) {
-      logWarn('[NativeTransfer]', 'Transfer already in progress, ignoring duplicate zip stream request.');
+      logWarn(
+        '[NativeTransfer]',
+        'Transfer already in progress, ignoring duplicate zip stream request.'
+      );
       return;
     }
 
@@ -685,11 +816,14 @@ class NativeTransferService {
 
         // A. Zip Entry 시작 (Local File Header)
         const headerChunk = zip.begin_file(zipEntryName, fileSize);
-        
+
         // Header 청크 전송
         if (headerChunk.length > 0) {
           await this.sendRawChunkToPeer(peerId, this.currentJobId, headerChunk);
-          logDebug('[NativeTransfer]', `  - Header sent: ${headerChunk.length} bytes`);
+          logDebug(
+            '[NativeTransfer]',
+            `  - Header sent: ${headerChunk.length} bytes`
+          );
         }
 
         // B. 파일 내용 읽기 및 압축
@@ -698,15 +832,18 @@ class NativeTransferService {
         // TODO: 대용량 파일(2GB+)를 위해 청크 단위 읽기 구현 필요
         try {
           const nativePath = file.nativePath || file.path || (file as any).path;
-          
+
           logDebug('[NativeTransfer]', `  - Reading file from: ${nativePath}`);
-          
+
           const fileData = await invoke<Uint8Array>('read_file_as_bytes', {
             path: nativePath,
           });
 
           // WASM을 통해 압축
-          logDebug('[NativeTransfer]', `  - Compressing ${fileData.length} bytes...`);
+          logDebug(
+            '[NativeTransfer]',
+            `  - Compressing ${fileData.length} bytes...`
+          );
           const compressedChunk = zip.process_chunk(fileData);
 
           // 압축된 데이터 전송
@@ -716,7 +853,10 @@ class NativeTransferService {
               this.currentJobId,
               compressedChunk
             );
-            logDebug('[NativeTransfer]', `  - Compressed chunk sent: ${compressedChunk.length} bytes`);
+            logDebug(
+              '[NativeTransfer]',
+              `  - Compressed chunk sent: ${compressedChunk.length} bytes`
+            );
           }
 
           totalBytesProcessed += Number(fileSize);
@@ -735,20 +875,26 @@ class NativeTransferService {
 
         // C. Zip Entry 종료 (Data Descriptor)
         const footerChunk = zip.end_file();
-        
+
         if (footerChunk.length > 0) {
           await this.sendRawChunkToPeer(peerId, this.currentJobId, footerChunk);
-          logDebug('[NativeTransfer]', `  - Footer sent: ${footerChunk.length} bytes`);
+          logDebug(
+            '[NativeTransfer]',
+            `  - Footer sent: ${footerChunk.length} bytes`
+          );
         }
       }
 
       // 3. Zip 종료 (Central Directory)
       logInfo('[NativeTransfer]', '📦 Finalizing ZIP (Central Directory)...');
       const finalChunk = zip.finalize();
-      
+
       if (finalChunk.length > 0) {
         await this.sendRawChunkToPeer(peerId, this.currentJobId, finalChunk);
-        logInfo('[NativeTransfer]', `✅ Central Directory sent: ${finalChunk.length} bytes`);
+        logInfo(
+          '[NativeTransfer]',
+          `✅ Central Directory sent: ${finalChunk.length} bytes`
+        );
       }
 
       // 4. 전송 완료 신호 (EOF)
@@ -769,9 +915,13 @@ class NativeTransferService {
         rustSignalingAdapter.sendTransferComplete(this.currentRoomId);
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      logError('[NativeTransfer]', '❌ Zip transfer failed:', { error, errorMessage });
-      
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      logError('[NativeTransfer]', '❌ Zip transfer failed:', {
+        error,
+        errorMessage,
+      });
+
       this.isZipping = false;
       this.emit('error', { message: `Zip Stream Failed: ${errorMessage}` });
       this.emit('status', 'ERROR');
@@ -903,7 +1053,11 @@ class NativeTransferService {
    * @param peerId 상대방 ID
    * @param baseJobId [NEW] Manifest와 동기화된 전송 ID
    */
-  async startBatchTransfer(files: any[], peerId: string, baseJobId?: string): Promise<void> {
+  async startBatchTransfer(
+    files: any[],
+    peerId: string,
+    baseJobId?: string
+  ): Promise<void> {
     if (this.isTransferring) {
       logWarn('[NativeTransfer]', '이미 전송 중입니다.');
       return;
@@ -1095,7 +1249,7 @@ class NativeTransferService {
   /**
    * 🆕 다중 파일 순차 수신 (Receiver)
    * Sender가 파일을 순차적으로 전송할 때, 각 파일을 순차적으로 수신합니다.
-   * 
+   *
    * 구현 방식:
    * 1. Sender가 첫 번째 파일 전송을 시작하면 수신
    * 2. 수신 완료 후 다음 파일 수신 대기
@@ -1233,7 +1387,7 @@ class NativeTransferService {
 
   /**
    * 파일 수신 (Receiver)
-   * 
+   *
    * @참고: 다중 파일 전송을 지원하기 위해 receiveBatchFiles가 추가됨
    * 단일 파일 수신도 receiveBatchFiles로 처리됨
    */

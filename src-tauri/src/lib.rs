@@ -34,6 +34,8 @@ use transfer::{
     UdpTransferCore, FileTransferEngine, TransferProgress,
     MultiStreamSender, MultiStreamReceiver, MultiStreamProgress,
     ZeroCopyEngine, IoMethod,
+    // 🆕 Zip 스트리밍
+    ZipStreamSender, ZipStreamReceiver, ZipStreamConfig, FileEntry, extract_zip_to_directory,
 };
 use relay::{RelayEngine, engine::verify_no_disk_write};
 use tokio::sync::mpsc;
@@ -1347,9 +1349,171 @@ async fn update_bootstrap_config(
     Ok(())
 }
 
+// --- Zip Streaming Commands ---
+
+/// 🆕 Zip 스트리밍으로 다중 파일 전송 (Sender)
+#[tauri::command]
+async fn send_zip_stream_transfer(
+    peer_id: String,
+    files: Vec<serde_json::Value>,
+    job_id: String,
+    compression_level: Option<u32>,
+    state: tauri::State<'_, AppState>,
+) -> Result<u64, String> {
+    // 연결 가져오기
+    let conn = {
+        let connections = state.accepted_connections.read().await;
+        connections
+            .get(&peer_id)
+            .ok_or_else(|| format!("피어 {}에 대한 연결이 없습니다.", peer_id))?
+            .clone()
+    };
+
+    info!("🗜️ Zip 스트리밍 전송 시작: {} 파일 -> {}", files.len(), peer_id);
+
+    // 파일 엔트리 변환
+    let file_entries: Vec<FileEntry> = files
+        .into_iter()
+        .filter_map(|f| {
+            let absolute_path = f.get("nativePath")
+                .or_else(|| f.get("path"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())?;
+            
+            let relative_path = f.get("relativePath")
+                .or_else(|| f.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    std::path::Path::new(&absolute_path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                });
+            
+            let size = f.get("nativeSize")
+                .or_else(|| f.get("size"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+
+            Some(FileEntry {
+                absolute_path,
+                relative_path,
+                size,
+            })
+        })
+        .collect();
+
+    if file_entries.is_empty() {
+        return Err("전송할 파일이 없습니다.".to_string());
+    }
+
+    // 설정
+    let config = ZipStreamConfig {
+        compression_level: compression_level.unwrap_or(1),
+        ..Default::default()
+    };
+
+    // 진행률 채널 설정
+    let (tx, mut rx) = mpsc::channel::<TransferProgress>(100);
+    let sender = ZipStreamSender::new(config).with_progress_channel(tx);
+
+    // 진행률 이벤트 전송
+    let app_handle = state.app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(progress) = rx.recv().await {
+            let _ = app_handle.emit("transfer-progress", &progress);
+        }
+    });
+
+    // 전송 실행
+    let bytes_sent = sender.send_zip_stream(&conn, file_entries, &job_id).await
+        .map_err(|e| format!("Zip 스트리밍 전송 실패: {}", e))?;
+
+    // 완료 이벤트
+    let _ = state.app_handle.emit("transfer-complete", serde_json::json!({
+        "jobId": job_id,
+        "bytesSent": bytes_sent,
+        "peerId": peer_id,
+    }));
+
+    info!("✅ Zip 스트리밍 전송 완료: {} bytes", bytes_sent);
+    Ok(bytes_sent)
+}
+
+/// 🆕 Zip 스트리밍으로 파일 수신 (Receiver)
+#[tauri::command]
+async fn receive_zip_stream_transfer(
+    peer_id: String,
+    save_dir: String,
+    job_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    // 연결 가져오기
+    let conn = {
+        let connections = state.active_connections.read().await;
+        connections
+            .get(&peer_id)
+            .ok_or_else(|| format!("피어 {}에 대한 연결이 없습니다.", peer_id))?
+            .clone()
+    };
+
+    info!("📥 Zip 스트리밍 수신 대기: {} -> {}", peer_id, save_dir);
+
+    let config = ZipStreamConfig::default();
+    
+    // 진행률 채널 설정
+    let (tx, mut rx) = mpsc::channel::<TransferProgress>(100);
+    let receiver = ZipStreamReceiver::new(config).with_progress_channel(tx);
+
+    // 진행률 이벤트 전송
+    let app_handle = state.app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(progress) = rx.recv().await {
+            let _ = app_handle.emit("transfer-progress", &progress);
+        }
+    });
+
+    // 수신 실행
+    let save_path = PathBuf::from(&save_dir);
+    let result_path = receiver.receive_zip_stream(&conn, save_path, &job_id).await
+        .map_err(|e| format!("Zip 스트리밍 수신 실패: {}", e))?;
+
+    let result_str = result_path.to_string_lossy().to_string();
+
+    // 완료 이벤트
+    let _ = state.app_handle.emit("transfer-complete", serde_json::json!({
+        "jobId": job_id,
+        "savedPath": result_str,
+        "peerId": peer_id,
+    }));
+
+    info!("✅ Zip 스트리밍 수신 완료: {:?}", result_path);
+    Ok(result_str)
+}
+
+/// 🆕 Zip 파일 압축 해제
+#[tauri::command]
+async fn extract_zip_file(
+    zip_path: String,
+    output_dir: String,
+) -> Result<Vec<String>, String> {
+    let zip_path = PathBuf::from(&zip_path);
+    let output_dir = PathBuf::from(&output_dir);
+
+    // 블로킹 작업이므로 spawn_blocking 사용
+    let result = tokio::task::spawn_blocking(move || {
+        extract_zip_to_directory(&zip_path, &output_dir)
+    }).await
+        .map_err(|e| format!("작업 실행 실패: {}", e))?
+        .map_err(|e| format!("압축 해제 실패: {}", e))?;
+
+    Ok(result.into_iter().map(|p| p.to_string_lossy().to_string()).collect())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    info!("🚀 GridWarp Enterprise 시작 중...");
+    info!("🚀 PonsWarp Enterprise 시작 중...");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1396,7 +1560,7 @@ pub fn run() {
                 }
             });
             
-            info!("✅ GridWarp 초기화 완료");
+            info!("✅ PonsWarp 초기화 완료");
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1495,6 +1659,10 @@ pub fn run() {
             start_native_file_stream,
             write_native_file_chunk,
             close_native_file_stream,
+            // 🆕 Zip 스트리밍 커맨드
+            send_zip_stream_transfer,
+            receive_zip_stream_transfer,
+            extract_zip_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

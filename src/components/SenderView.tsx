@@ -209,7 +209,9 @@ const SenderView: React.FC<SenderViewProps> = () => {
 
         // 🆕 [FIX] 이미 전송이 시작되었다면 중복 실행 방지
         if (isTransferStartedRef.current) {
-          console.warn('[SenderView] Transfer already started, ignoring duplicate connection event.');
+          console.warn(
+            '[SenderView] Transfer already started, ignoring duplicate connection event.'
+          );
           return;
         }
 
@@ -222,8 +224,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
         // 전송 시작 플래그 설정
         isTransferStartedRef.current = true;
 
-        // 🆕 Receiver가 receiveFile()을 호출하고 accept_bi() 대기 상태가 될 때까지 기다림
-        // 2초 대기 후 파일 전송 시작 (Receiver가 MATERIALIZE 버튼을 누를 시간)
+        // 🆕 Receiver가 준비될 때까지 대기
         console.log('[SenderView] ⏳ Waiting 2s for receiver to be ready...');
         setStatus('CONNECTING');
         await new Promise(resolve => setTimeout(resolve, 2000));
@@ -231,23 +232,27 @@ const SenderView: React.FC<SenderViewProps> = () => {
         setStatus('TRANSFERRING');
 
         try {
-          console.log(`[SenderView] 🚀 Starting transfer of ${files.length} files...`);
+          // 🆕 [CRITICAL] Ref에서 최신 transferId 가져오기
+          const batchId =
+            manifestRef.current?.transferId || `fallback-${Date.now()}`;
 
-          // 🆕 [CRITICAL FIX] Ref를 사용하여 최신 transferId 가져오기 (클로저 문제 해결)
-          const batchId = manifestRef.current?.transferId || manifest?.transferId || `fallback-${Date.now()}`;
-          
           console.log(`[SenderView] Starting transfer with ID: ${batchId}`);
-          console.log(`[SenderView] manifestRef.current.transferId: ${manifestRef.current?.transferId}`);
-          console.log(`[SenderView] manifest.state.transferId: ${manifest?.transferId}`);
+          console.log(`[SenderView] File count: ${files.length}`);
 
-          // 🚨 [임시 수정] send_stream_chunk API가 없으므로 배치 전송만 사용
-          // 향후 Rust 백엔드에 스트리밍 API가 구현되면 Zip 모드 활성화
-          console.log(`[SenderView] 📦 Starting batch transfer of ${files.length} file(s)...`);
-          setStatus('TRANSFERRING');
-          await nativeTransferService.startBatchTransfer(files, data.peerId, batchId);
+          // 🆕 [핵심 변경] startTransferDispatcher 사용 (자동 분기)
+          // - 단일 파일: 기존 방식
+          // - 다중 파일: Zip 스트리밍
+          await nativeTransferService.startTransferDispatcher(
+            files,
+            data.peerId,
+            batchId
+          );
+
+          // 완료 처리
+          setStatus('DONE');
         } catch (error: any) {
           console.error('[SenderView] Transfer failed:', error);
-          isTransferStartedRef.current = false; // 실패 시 플래그 해제
+          isTransferStartedRef.current = false;
           setStatus('IDLE');
         }
       });
@@ -272,7 +277,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
 
     swarmManager.on('error', (errorMsg: string) => {
       console.error('[SenderView] SwarmManager error:', errorMsg);
-      console.error('[SenderView] SwarmManager error:', errorMsg);
+
       setStatus('IDLE');
     });
 
@@ -511,16 +516,26 @@ const SenderView: React.FC<SenderViewProps> = () => {
             // Rust 백엔드에서 파일 메타데이터 조회
             const meta = await invoke('get_file_metadata', { path });
             console.log('[SenderView] 📊 Raw metadata response:', meta);
-            console.log('[SenderView] 📊 JSON stringify:', JSON.stringify(meta));
+            console.log(
+              '[SenderView] 📊 JSON stringify:',
+              JSON.stringify(meta)
+            );
 
             // 옵셔널 체이닝으로 안전하게 값 추출
             const metaObj = meta as any;
             size = metaObj?.size ?? 0;
             if (metaObj?.modifiedAt || metaObj?.modified_at) {
-              modified = new Date(metaObj.modifiedAt || metaObj.modified_at).getTime();
+              modified = new Date(
+                metaObj.modifiedAt || metaObj.modified_at
+              ).getTime();
             }
 
-            console.log('[SenderView] 📊 File metadata:', { path, size, name, modified });
+            console.log('[SenderView] 📊 File metadata:', {
+              path,
+              size,
+              name,
+              modified,
+            });
 
             if (size === 0) {
               console.error('[SenderView] ❌ File size is 0! Path:', path);
@@ -545,7 +560,10 @@ const SenderView: React.FC<SenderViewProps> = () => {
         })
       );
 
-      console.log('[SenderView] Files with metadata:', filesWithMeta.map(f => ({ name: f.name, size: f.nativeSize })));
+      console.log(
+        '[SenderView] Files with metadata:',
+        filesWithMeta.map(f => ({ name: f.name, size: f.nativeSize }))
+      );
 
       // 3. 기존 파일 처리 로직에 전달 (nativeSize 포함)
       if (filesWithMeta.length > 0) {
@@ -559,7 +577,11 @@ const SenderView: React.FC<SenderViewProps> = () => {
           lastModified: item.lastModified,
         }));
 
-        console.log('[SenderView] Calling processScannedFiles with', scannedFilesWithSize.length, 'files');
+        console.log(
+          '[SenderView] Calling processScannedFiles with',
+          scannedFilesWithSize.length,
+          'files'
+        );
 
         // 🆕 파일 목록 UI에 표시
         setScannedFileList(scannedFilesWithSize);
@@ -568,8 +590,14 @@ const SenderView: React.FC<SenderViewProps> = () => {
     } catch (err) {
       console.error('[SenderView] ❌ Native file selection failed:', err);
       console.error('[SenderView] Error type:', typeof err);
-      console.error('[SenderView] Error details:', err instanceof Error ? err.message : String(err));
-      console.error('[SenderView] Stack:', err instanceof Error ? err.stack : 'N/A');
+      console.error(
+        '[SenderView] Error details:',
+        err instanceof Error ? err.message : String(err)
+      );
+      console.error(
+        '[SenderView] Stack:',
+        err instanceof Error ? err.stack : 'N/A'
+      );
 
       // 권한 에러 등이 발생할 수 있으므로 사용자에게 알림
       console.error(
@@ -655,17 +683,14 @@ const SenderView: React.FC<SenderViewProps> = () => {
       // ScannedFile 타입에 맞게 더미 File 객체 생성 (Zero-Copy를 위해 내용은 비어있음)
       const nativeFiles = scannedFiles.map(item => {
         // 파일명 추출 (path, name 중에서 우선 순위로 선택)
-        const fileName = item.name || item.path?.split(/[\\/]/).pop() || 'unknown';
+        const fileName =
+          item.name || item.path?.split(/[\\/]/).pop() || 'unknown';
 
         // 더미 File 객체 생성 (내용은 비어있음)
-        const dummyFile = new File(
-          [],
-          fileName,
-          {
-            type: 'application/octet-stream',
-            lastModified: item.lastModified || Date.now(),
-          }
-        );
+        const dummyFile = new File([], fileName, {
+          type: 'application/octet-stream',
+          lastModified: item.lastModified || Date.now(),
+        });
 
         // File 객체에 path 속성 추가
         (dummyFile as any).path = item.path;
@@ -673,7 +698,8 @@ const SenderView: React.FC<SenderViewProps> = () => {
         return {
           file: dummyFile, // ScannedFile 타입 호환을 위한 더미 File 객체
           path: item.relativePath || item.path, // Manifest에는 '상대 경로'를 넣어야 Receiver가 폴더 구조를 복원함
-          relativePath: item.relativePath || item.path?.split(/[\\/]/).pop() || fileName, // Zip 엔트리명용 상대 경로/파일명
+          relativePath:
+            item.relativePath || item.path?.split(/[\\/]/).pop() || fileName, // Zip 엔트리명용 상대 경로/파일명
           nativePath: item.nativePath || item.path, // 🆕 [FIX] 실제 전송 시 사용할 절대 경로
           nativeSize: item.nativeSize, // 실제 파일 크기
           name: fileName, // 파일명 명시적 저장
@@ -697,7 +723,9 @@ const SenderView: React.FC<SenderViewProps> = () => {
         manifest.isZipStream = true;
         // Receiver가 알 수 있도록 파일명을 .zip으로 변경 제안
         manifest.rootName = (manifest.rootName || 'archive') + '.zip';
-        console.log('[SenderView] 🗜️ Zip Streaming mode enabled for multi-file/folder transfer');
+        console.log(
+          '[SenderView] 🗜️ Zip Streaming mode enabled for multi-file/folder transfer'
+        );
       }
 
       console.log('[SenderView] 🚀 Native mode - Zero-copy manifest created:', {
@@ -1036,13 +1064,19 @@ const SenderView: React.FC<SenderViewProps> = () => {
                   </div>
                   <span className="text-xs text-gray-500 font-mono">
                     {formatBytes(
-                      scannedFileList.reduce((sum, f) => sum + (f.nativeSize || 0), 0)
+                      scannedFileList.reduce(
+                        (sum, f) => sum + (f.nativeSize || 0),
+                        0
+                      )
                     )}
                   </span>
                 </div>
                 <div className="space-y-1">
                   {scannedFileList.slice(0, 10).map((file, i) => (
-                    <div key={i} className="flex items-center justify-between py-1 px-2 rounded bg-black/20 hover:bg-black/30 text-xs">
+                    <div
+                      key={i}
+                      className="flex items-center justify-between py-1 px-2 rounded bg-black/20 hover:bg-black/30 text-xs"
+                    >
                       <div className="flex items-center gap-2 flex-1 min-w-0">
                         <FileIcon className="w-3 h-3 text-gray-400 flex-shrink-0" />
                         <span className="text-gray-300 truncate">
@@ -1186,8 +1220,8 @@ const SenderView: React.FC<SenderViewProps> = () => {
                   Do NOT close this window.
                 </p>
                 <p>
-                  The receivers are currently saving files. The connection
-                  must remain open until they finish downloading.
+                  The receivers are currently saving files. The connection must
+                  remain open until they finish downloading.
                 </p>
               </div>
             </div>
