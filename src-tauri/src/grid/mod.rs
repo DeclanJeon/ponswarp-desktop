@@ -12,20 +12,35 @@
 
 pub mod bitfield;
 pub mod piece_manager;
-pub mod protocol;
-pub mod scheduler;
-pub mod swarm;
-pub mod dht;
-pub mod peer;
-pub mod hybrid_discovery;
 pub mod bootstrap_discovery;
 
-pub use bitfield::Bitfield;
-pub use piece_manager::{PieceManager, PieceInfo};
+// NOTE: Grid 내부 구현 타입들은 현재 외부로 re-export 하지 않습니다.
+// (사용 시 `grid::bitfield::Bitfield` 처럼 모듈 경로로 접근)
+
+// Phase 2 (WIP) - 아직 앱의 기본 플로우에서 사용하지 않으므로, 기본 빌드 경고/크기/컴파일 시간을 줄이기 위해 feature로 분리
+// 필요 시 `--features grid-experimental` 로 활성화
+#[cfg(feature = "grid-experimental")]
+pub mod protocol;
+#[cfg(feature = "grid-experimental")]
+pub mod scheduler;
+#[cfg(feature = "grid-experimental")]
+pub mod swarm;
+#[cfg(feature = "grid-experimental")]
+pub mod dht;
+#[cfg(feature = "grid-experimental")]
+pub mod peer;
+#[cfg(feature = "grid-experimental")]
+pub mod hybrid_discovery;
+
+#[cfg(feature = "grid-experimental")]
 pub use protocol::GridMessage;
+#[cfg(feature = "grid-experimental")]
 pub use scheduler::Scheduler;
+#[cfg(feature = "grid-experimental")]
 pub use swarm::{GridSwarm, SwarmCommand, SwarmEvent};
+#[cfg(feature = "grid-experimental")]
 pub use dht::{DhtService, DhtCommand, DhtEvent};
+#[cfg(feature = "grid-experimental")]
 pub use peer::{Peer, PeerCommand, PeerEvent};
 
 use serde::Serialize;

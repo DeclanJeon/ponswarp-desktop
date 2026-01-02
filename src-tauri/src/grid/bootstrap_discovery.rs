@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// 부트스트랩 노드 mDNS 서비스 타입
 const BOOTSTRAP_SERVICE_TYPE: &str = "_pswp._udp.local.";

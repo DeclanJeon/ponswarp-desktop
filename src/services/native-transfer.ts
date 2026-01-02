@@ -42,9 +42,12 @@ interface TransferJob {
 export interface TransferProgress {
   jobId: string;
   bytesTransferred: number;
+  acknowledgedBytes?: number; // 🆕 수신 확인된 바이트 (Sync Logic)
   totalBytes: number;
   progressPercent: number;
+  progress?: number; // UI 호환(=progressPercent)
   speedBps: number;
+  speed?: number; // UI 호환(=speedBps)
   state: string;
 }
 
@@ -57,6 +60,24 @@ export interface NativePeerInfo {
   peerId: string;
   quicAddress: string;
   roomId: string;
+}
+
+function normalizeRustTransferState(rawState: unknown): string {
+  if (typeof rawState === 'string') return rawState.toUpperCase();
+  if (rawState && typeof rawState === 'object') {
+    const keys = Object.keys(rawState as Record<string, unknown>);
+    if (keys.length > 0) return keys[0].toUpperCase();
+  }
+  return 'TRANSFERRING';
+}
+
+function mapTransferStateToUiStatus(state: string): string {
+  // SenderView/ReceiverView가 사용하는 status 값에 맞춰 최소 매핑만 수행
+  if (state === 'PREPARING') return 'PREPARING';
+  if (state === 'TRANSFERRING') return 'TRANSFERRING';
+  if (state === 'COMPLETED') return 'COMPLETED';
+  if (state === 'FAILED') return 'ERROR';
+  return state;
 }
 
 /**
@@ -133,6 +154,10 @@ class NativeTransferService {
         payload?.bytes_transferred ?? payload?.bytesTransferred ?? 0;
       const speedBps = payload?.speed_bps ?? payload?.speedBps ?? 0;
       const totalBytes = payload?.total_bytes ?? payload?.totalBytes ?? 0;
+      const acknowledgedBytes =
+        payload?.acknowledged_bytes ?? payload?.acknowledgedBytes ?? 0;
+      const rawState = payload?.state;
+      const state = normalizeRustTransferState(rawState);
 
       // 🆕 null 체크 - payload가 유효한지 확인
       if (!payload || typeof progressPercent !== 'number') {
@@ -147,17 +172,67 @@ class NativeTransferService {
       ) {
         this.lastProgressEmit = now;
 
-        const progressData = {
+        const progressData: Partial<TransferProgress> = {
+          jobId: payload?.job_id || payload?.jobId,
+          progressPercent: progressPercent,
           progress: progressPercent,
+          speedBps: speedBps,
           speed: speedBps,
           bytesTransferred: bytesTransferred,
+          acknowledgedBytes: acknowledgedBytes,
           totalBytes: totalBytes,
+          state,
         };
 
         this.emit('progress', progressData);
+        // 상태도 같이 전달 (Sender/Receiver UI가 단계 전환에 활용)
+        this.emit('status', mapTransferStateToUiStatus(state));
       }
     });
     this.unlisteners.push(progressUnlisten);
+
+    // 🆕 Multistream Progress Listener
+    const multistreamProgressUnlisten = await listen<any>(
+      'multistream-progress',
+      event => {
+        const now = Date.now();
+        const payload = event.payload;
+
+        const progressPercent =
+          payload?.progress_percent ?? payload?.progressPercent ?? 0;
+        const bytesTransferred =
+          payload?.bytes_transferred ?? payload?.bytesTransferred ?? 0;
+        const acknowledgedBytes =
+          payload?.acknowledged_bytes ?? payload?.acknowledgedBytes ?? 0;
+        const speedBps = payload?.speed_bps ?? payload?.speedBps ?? 0;
+        const totalBytes = payload?.total_bytes ?? payload?.totalBytes ?? 0;
+        const rawState = payload?.state;
+        const state = normalizeRustTransferState(rawState);
+
+        if (
+          now - this.lastProgressEmit >= this.PROGRESS_THROTTLE_MS ||
+          progressPercent >= 100
+        ) {
+          this.lastProgressEmit = now;
+
+          const progressData: Partial<TransferProgress> = {
+            jobId: payload?.job_id || payload?.jobId,
+            progressPercent: progressPercent,
+            progress: progressPercent,
+            speedBps: speedBps,
+            speed: speedBps,
+            bytesTransferred: bytesTransferred,
+            acknowledgedBytes: acknowledgedBytes, // 🚀 Sync된 진행률
+            totalBytes: totalBytes,
+            state,
+          };
+
+          this.emit('progress', progressData);
+          this.emit('status', mapTransferStateToUiStatus(state));
+        }
+      }
+    );
+    this.unlisteners.push(multistreamProgressUnlisten);
 
     const completeUnlisten = await listen('transfer-complete', event => {
       logInfo('[NativeTransfer]', '전송 완료:', event.payload);
@@ -165,6 +240,17 @@ class NativeTransferService {
       this.emit('status', 'COMPLETED');
     });
     this.unlisteners.push(completeUnlisten);
+
+    // 🆕 Multistream Complete Listener
+    const multistreamCompleteUnlisten = await listen(
+      'multistream-complete',
+      event => {
+        logInfo('[NativeTransfer]', '멀티스트림 전송 완료:', event.payload);
+        this.emit('complete', event.payload);
+        this.emit('status', 'COMPLETED');
+      }
+    );
+    this.unlisteners.push(multistreamCompleteUnlisten);
 
     // 피어 발견 이벤트
     const peerDiscoveredUnlisten = await listen<NativePeerInfo>(
@@ -496,7 +582,7 @@ class NativeTransferService {
 
       this.isZipping = true;
       this.currentJobId = transferId;
-      this.emit('status', 'TRANSFERRING');
+      this.emit('status', 'PREPARING');
 
       try {
         await this.sendZipStreamTransfer(files, peerId, transferId, 1);

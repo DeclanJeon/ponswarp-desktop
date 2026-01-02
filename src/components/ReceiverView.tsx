@@ -401,8 +401,8 @@ const ReceiverView: React.FC = () => {
         }
 
         setProgressData({
-          progress: data.progress || 0,
-          speed: data.speed || 0,
+          progress: data.progress ?? data.progressPercent ?? 0,
+          speed: data.speed ?? data.speedBps ?? 0,
           bytesTransferred: data.bytesTransferred || 0,
           totalBytes: data.totalBytes || 0,
         });

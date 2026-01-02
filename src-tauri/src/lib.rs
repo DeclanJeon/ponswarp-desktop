@@ -61,7 +61,14 @@ pub struct AppState {
     // 🆕 Tauri AppHandle 추가
     pub app_handle: AppHandle,
     // 🆕 앱 종료 진행 중 플래그
+    // 🆕 앱 종료 진행 중 플래그
     pub is_closing: Arc<AtomicBool>,
+    // 🆕 활성 작업 관리 (취소용)
+    pub active_jobs: Arc<RwLock<std::collections::HashMap<String, JobControl>>>,
+}
+
+pub struct JobControl {
+    pub is_cancelled: Arc<AtomicBool>,
 }
 
 impl Default for AppState {
@@ -1416,7 +1423,19 @@ async fn send_zip_stream_transfer(
 
     // 진행률 채널 설정
     let (tx, mut rx) = mpsc::channel::<TransferProgress>(100);
-    let sender = ZipStreamSender::new(config).with_progress_channel(tx);
+    
+    // 취소 토큰 생성 및 등록
+    let is_cancelled = Arc::new(AtomicBool::new(false));
+    let job_control = JobControl { is_cancelled: is_cancelled.clone() };
+    state.active_jobs.write().await.insert(job_id.clone(), job_control);
+
+    // Job Cleanup Guard (함수 종료 시 자동 제거)
+    // Rust의 Drop을 이용하거나, ensure logic 사용. 여기서는 명시적 제거 사용.
+    
+    // Sender 설정 (with_cancellation은 zip_stream.rs에 추가해야 함)
+    let sender = ZipStreamSender::new(config)
+        .with_progress_channel(tx)
+        .with_cancellation(is_cancelled);
 
     // 진행률 이벤트 전송
     let app_handle = state.app_handle.clone();
@@ -1427,7 +1446,12 @@ async fn send_zip_stream_transfer(
     });
 
     // 전송 실행
-    let bytes_sent = sender.send_zip_stream(&conn, file_entries, &job_id).await
+    let result = sender.send_zip_stream(&conn, file_entries, &job_id).await;
+    
+    // 작업 등록 해제
+    state.active_jobs.write().await.remove(&job_id);
+
+    let bytes_sent = result
         .map_err(|e| format!("Zip 스트리밍 전송 실패: {}", e))?;
 
     // 완료 이벤트
@@ -1511,6 +1535,22 @@ async fn extract_zip_file(
     Ok(result.into_iter().map(|p| p.to_string_lossy().to_string()).collect())
 }
 
+/// 🆕 전송 작업 취소
+#[tauri::command]
+async fn cancel_transfer(
+    job_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut jobs = state.active_jobs.write().await;
+    if let Some(control) = jobs.get(&job_id) {
+        control.is_cancelled.store(true, Ordering::SeqCst);
+        info!("🛑 작업 취소 요청됨: {}", job_id);
+        Ok(())
+    } else {
+        Err(format!("작업을 찾을 수 없습니다: {}", job_id))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     info!("🚀 PonsWarp Enterprise 시작 중...");
@@ -1549,6 +1589,7 @@ pub fn run() {
                 embedded_bootstrap: Arc::new(RwLock::new(None)),
                 app_handle: app_handle.clone(),
                 is_closing: Arc::new(AtomicBool::new(false)),
+                active_jobs: Arc::new(RwLock::new(std::collections::HashMap::new())),
             };
             app.manage(state);
             
@@ -1663,6 +1704,8 @@ pub fn run() {
             send_zip_stream_transfer,
             receive_zip_stream_transfer,
             extract_zip_file,
+            // 🆕 작업 취소
+            cancel_transfer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

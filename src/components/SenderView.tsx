@@ -97,18 +97,21 @@ const SenderView: React.FC<SenderViewProps> = () => {
       });
 
       nativeTransferService.on('status', (s: any) => {
+        if (s === 'PREPARING') setStatus('PREPARING');
         if (s === 'TRANSFERRING') setStatus('TRANSFERRING');
         if (s === 'COMPLETED') setStatus('DONE');
         if (s === 'ERROR') setStatus('IDLE');
       });
 
       nativeTransferService.on('progress', (data: any) => {
-        // 🆕 진행률이 오면 TRANSFERRING 상태로 강제 전환
+        const rawState = String(data?.state || '').toUpperCase();
+        if (rawState.includes('PREPAR')) setStatus('PREPARING');
+        else setStatus('TRANSFERRING');
+
         console.log('[SenderView] 📊 Progress event:', data);
-        setStatus('TRANSFERRING');
         setProgressData({
-          progress: data.progress || 0,
-          speed: data.speed || 0,
+          progress: data.progress ?? data.progressPercent ?? 0,
+          speed: data.speed ?? data.speedBps ?? 0,
           bytesTransferred: data.bytesTransferred || 0,
           totalBytes: data.totalBytes || 0,
         });
@@ -943,9 +946,26 @@ const SenderView: React.FC<SenderViewProps> = () => {
             <p className="text-gray-400 mb-4">
               Compressing {manifest?.totalFiles} files into ZIP archive
             </p>
-            <p className="text-sm text-gray-500">
-              This may take a moment for large folders. Please wait...
-            </p>
+            <div className="bg-black/30 backdrop-blur-md p-4 rounded-2xl border border-white/5">
+              <div className="flex items-center justify-between text-xs text-gray-400 mb-2">
+                <span>{Math.floor(progressData.progress)}%</span>
+                <span>
+                  {formatBytes(progressData.bytesTransferred)} /{' '}
+                  {formatBytes(progressData.totalBytes)}
+                </span>
+              </div>
+              <div className="w-full bg-white/10 rounded-full h-2 overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-cyan-500 to-purple-500 transition-all duration-200"
+                  style={{
+                    width: `${Math.min(100, Math.max(0, progressData.progress))}%`,
+                  }}
+                />
+              </div>
+              <p className="mt-3 text-xs text-gray-500">
+                Packaging speed: {formatBytes(progressData.speed)}/s
+              </p>
+            </div>
           </motion.div>
         )}
 

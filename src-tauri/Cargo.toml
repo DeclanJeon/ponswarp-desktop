@@ -67,6 +67,10 @@ hex = "0.4"
 bincode = "1.3"
 rand = "0.8"
 
+[features]
+# Grid Protocol (Phase 2) - 현재 앱의 기본 전송 경로에서는 미사용(WIP)
+grid-experimental = []
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # io-uring = "0.6"  # Linux 고성능 I/O (Phase 2에서 활성화)
 

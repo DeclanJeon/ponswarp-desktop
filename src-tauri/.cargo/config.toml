@@ -1,0 +1,6 @@
+[target.x86_64-unknown-linux-gnu]
+# NOTE: 이 프로젝트는 Tauri(GTK/WebKit) + 대규모 의존성 링크를 포함하며,
+# 일부 환경에서 `rust-lld`(lld) 사용 시 "undefined hidden symbol" 링크 에러가 발생합니다.
+# 안정성을 위해 GNU ld.bfd를 강제합니다.
+rustflags = ["-C", "link-arg=-fuse-ld=bfd"]
+

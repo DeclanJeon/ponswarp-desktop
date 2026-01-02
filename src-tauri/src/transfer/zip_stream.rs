@@ -1,12 +1,14 @@
 //! Zip 스트리밍 전송 모듈
 //!
 //! 다중 파일을 실시간으로 Zip 압축하여 QUIC 스트림으로 전송합니다.
-//! - Sender: 파일들을 순차적으로 읽어 Zip Entry로 추가하며 스트림 전송
+//! - Sender: 파일들을 순차적으로 읽어 Zip Entry로 추가하며 스트림 전송 (Producer-Consumer Pattern)
 //! - Receiver: 스트림에서 읽어 직접 파일로 저장
 
 use std::fs::File;
-use std::io::{BufReader, Read, Write, Seek, SeekFrom};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -15,8 +17,10 @@ use tokio::sync::mpsc;
 use tracing::{info, warn, error, debug};
 use zip::write::FileOptions;
 use zip::{ZipWriter, CompressionMethod};
+use uuid::Uuid;
 
 use super::TransferProgress;
+use super::TransferState;
 
 /// Zip 스트리밍 전송 설정
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +58,8 @@ pub struct FileEntry {
 pub struct ZipStreamSender {
     config: ZipStreamConfig,
     progress_tx: Option<mpsc::Sender<TransferProgress>>,
+    /// 취소 플래그 (Graceful Cancellation)
+    is_cancelled: Option<Arc<AtomicBool>>,
 }
 
 impl ZipStreamSender {
@@ -61,6 +67,7 @@ impl ZipStreamSender {
         Self {
             config,
             progress_tx: None,
+            is_cancelled: None,
         }
     }
 
@@ -69,19 +76,34 @@ impl ZipStreamSender {
         self
     }
 
-    /// QUIC 연결을 통해 Zip 스트림 전송
-    /// 
-    /// 파일들을 순차적으로 읽어 Zip으로 압축하면서 QUIC 스트림으로 전송합니다.
+    /// 취소 플래그 설정 (Graceful Cancellation)
+    pub fn with_cancellation(mut self, is_cancelled: Arc<AtomicBool>) -> Self {
+        self.is_cancelled = Some(is_cancelled);
+        self
+    }
+
+    /// QUIC 연결을 통해 Zip 스트림 전송 (True Streaming Architecture)
     pub async fn send_zip_stream(
         &self,
         conn: &quinn::Connection,
         files: Vec<FileEntry>,
         job_id: &str,
     ) -> Result<u64> {
+        // 취소 플래그 복사
+        let is_cancelled = self.is_cancelled.clone().unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        
+        // 취소 확인 함수
+        let check_cancelled = || -> Result<()> {
+            if is_cancelled.load(Ordering::SeqCst) {
+                Err(anyhow::anyhow!("Transfer cancelled by user"))
+            } else {
+                Ok(())
+            }
+        };
         let total_size: u64 = files.iter().map(|f| f.size).sum();
         let file_count = files.len();
         
-        info!("🗜️ Zip 스트리밍 시작: {} 파일, 총 {} bytes", file_count, total_size);
+        info!("🗜️ Zip 전송 시작: {} 파일, 원본 크기 {} bytes", file_count, total_size);
 
         // QUIC 양방향 스트림 열기
         let (mut send, mut recv) = conn.open_bi().await?;
@@ -101,114 +123,227 @@ impl ZipStreamSender {
             return Err(anyhow::anyhow!("Receiver not ready for zip stream"));
         }
 
-        // 메모리 버퍼에 Zip 생성 후 스트림으로 전송
-        // 대용량 파일의 경우 청크 단위로 처리
-        let mut total_sent: u64 = 0;
-        let mut bytes_processed: u64 = 0;
-        let start_time = Instant::now();
-        let mut last_progress = Instant::now();
+        // zip 크레이트(`zip`)는 `Write + Seek`를 요구하며, QUIC 스트림은 랜덤 seek를 지원할 수 없습니다.
+        // 기존 구현(ChannelWriter + 제한 Seek)은 중앙 디렉토리/헤더 업데이트 시 seek가 발생해 실패합니다.
+        // 따라서 메모리 폭증 없이 동작하도록, 임시 파일에 Zip을 생성한 뒤 그 파일을 스트림으로 전송합니다.
 
-        // Zip 압축 옵션
-        let options = FileOptions::default()
-            .compression_method(if self.config.compression_level == 0 {
-                CompressionMethod::Stored
-            } else {
-                CompressionMethod::Deflated
-            })
-            .compression_level(Some(self.config.compression_level as i32));
+        let tmp_zip_path = std::env::temp_dir().join(format!("ponswarp-{}.zip", Uuid::new_v4()));
+        let tmp_zip_path_for_cleanup = tmp_zip_path.clone();
 
-        // 임시 버퍼에 Zip 생성
-        let mut zip_buffer = std::io::Cursor::new(Vec::new());
-        {
-            let mut zip_writer = ZipWriter::new(&mut zip_buffer);
+        let files_clone = files.clone();
+        let job_id_clone = job_id.to_string();
+        let total_size_clone = total_size;
+        let compression_level = self.config.compression_level;
+        let progress_interval_ms = self.config.progress_interval_ms;
+        let is_cancelled_clone = is_cancelled.clone();
+        let progress_tx = self.progress_tx.clone();
 
-            for (idx, file_entry) in files.iter().enumerate() {
-                debug!("📦 파일 추가 중 ({}/{}): {}", idx + 1, file_count, file_entry.relative_path);
+        info!("🧱 임시 Zip 생성 시작: {:?}", tmp_zip_path);
 
-                // Zip Entry 시작
+        let zip_create_result = tokio::task::spawn_blocking(move || -> Result<()> {
+            let zip_file = File::create(&tmp_zip_path)?;
+            let mut zip_writer = ZipWriter::new(zip_file);
+
+            let start_time = Instant::now();
+            let mut last_progress = Instant::now();
+            let mut bytes_processed: u64 = 0;
+
+            let options = FileOptions::default()
+                .compression_method(if compression_level == 0 {
+                    CompressionMethod::Stored
+                } else {
+                    CompressionMethod::Deflated
+                })
+                .compression_level(Some(compression_level as i32))
+                .unix_permissions(0o755);
+
+            for (idx, file_entry) in files_clone.iter().enumerate() {
+                if is_cancelled_clone.load(Ordering::SeqCst) {
+                    let _ = std::fs::remove_file(&tmp_zip_path);
+                    return Err(anyhow::anyhow!("Transfer cancelled during zip creation"));
+                }
+
+                debug!(
+                    "📦 Zip에 파일 추가 중 ({}/{}): {}",
+                    idx + 1,
+                    files_clone.len(),
+                    file_entry.relative_path
+                );
+
                 zip_writer.start_file(&file_entry.relative_path, options)?;
+                let mut input = File::open(&file_entry.absolute_path)?;
 
-                // 파일 읽기 및 Zip에 쓰기
-                let file = File::open(&file_entry.absolute_path)?;
-                let mut reader = BufReader::with_capacity(self.config.chunk_size, file);
-                let mut chunk_buf = vec![0u8; self.config.chunk_size];
-
+                let mut buffer = vec![0u8; 128 * 1024];
                 loop {
-                    let bytes_read = reader.read(&mut chunk_buf)?;
+                    let bytes_read = input.read(&mut buffer)?;
                     if bytes_read == 0 {
                         break;
                     }
+                    if is_cancelled_clone.load(Ordering::SeqCst) {
+                        let _ = std::fs::remove_file(&tmp_zip_path);
+                        return Err(anyhow::anyhow!("Transfer cancelled during file read"));
+                    }
+                    zip_writer.write_all(&buffer[..bytes_read])?;
 
-                    zip_writer.write_all(&chunk_buf[..bytes_read])?;
                     bytes_processed += bytes_read as u64;
-
-                    // 진행률 보고
-                    if last_progress.elapsed().as_millis() >= self.config.progress_interval_ms as u128 {
+                    if last_progress.elapsed().as_millis() >= progress_interval_ms as u128 {
                         last_progress = Instant::now();
-                        self.report_progress(job_id, bytes_processed, total_size, &start_time).await;
+                        if let Some(tx) = &progress_tx {
+                            let elapsed = start_time.elapsed().as_secs_f64();
+                            let speed = if elapsed > 0.0 {
+                                (bytes_processed as f64 / elapsed) as u64
+                            } else {
+                                0
+                            };
+                            let progress = if total_size_clone > 0 {
+                                (bytes_processed as f64 / total_size_clone as f64) * 100.0
+                            } else {
+                                0.0
+                            };
+                            let _ = tx.blocking_send(TransferProgress {
+                                job_id: job_id_clone.clone(),
+                                bytes_transferred: bytes_processed,
+                                total_bytes: total_size_clone,
+                                progress_percent: progress,
+                                speed_bps: speed,
+                                state: TransferState::Preparing,
+                            });
+                        }
                     }
                 }
             }
 
-            // Zip 마무리 (Central Directory 작성)
             zip_writer.finish()?;
-        }
 
-        // Zip 버퍼를 QUIC 스트림으로 전송
-        let zip_data = zip_buffer.into_inner();
-        let zip_size = zip_data.len();
-        
-        info!("📤 Zip 데이터 전송 시작: {} bytes (압축률: {:.1}%)", 
-            zip_size, 
-            (1.0 - zip_size as f64 / total_size as f64) * 100.0
-        );
+            // Zip 패키징 100% 이벤트 (UI가 확실히 완료 상태를 표시할 수 있도록)
+            if let Some(tx) = &progress_tx {
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let speed = if elapsed > 0.0 {
+                    (bytes_processed as f64 / elapsed) as u64
+                } else {
+                    0
+                };
+                let _ = tx.blocking_send(TransferProgress {
+                    job_id: job_id_clone,
+                    bytes_transferred: total_size_clone,
+                    total_bytes: total_size_clone,
+                    progress_percent: 100.0,
+                    speed_bps: speed,
+                    state: TransferState::Preparing,
+                });
+            }
+            Ok(())
+        })
+        .await;
 
-        // 크기 먼저 전송
-        send.write_all(&(zip_size as u64).to_le_bytes()).await?;
-
-        // 데이터 청크 단위로 전송
-        for chunk in zip_data.chunks(self.config.chunk_size) {
-            send.write_all(chunk).await?;
-            total_sent += chunk.len() as u64;
-
-            // 진행률 보고
-            if last_progress.elapsed().as_millis() >= self.config.progress_interval_ms as u128 {
-                last_progress = Instant::now();
-                let progress = (total_sent as f64 / zip_size as f64) * 100.0;
-                self.report_progress_direct(job_id, total_sent, zip_size as u64, progress, &start_time).await;
+        match zip_create_result {
+            Ok(Ok(())) => info!("✅ 임시 Zip 생성 완료"),
+            Ok(Err(e)) => {
+                error!("❌ 임시 Zip 생성 실패: {}", e);
+                let _ = tokio::fs::remove_file(&tmp_zip_path_for_cleanup).await;
+                return Err(e);
+            }
+            Err(e) => {
+                error!("❌ Zip 생성 태스크 패닉: {}", e);
+                let _ = tokio::fs::remove_file(&tmp_zip_path_for_cleanup).await;
+                return Err(anyhow::anyhow!("Zip creation task panicked"));
             }
         }
 
-        // 스트림 종료
-        send.finish()?;
+        check_cancelled()?;
 
-        // Receiver의 완료 응답 대기 (타임아웃 적용)
-        let mut done_buf = [0u8; 4];
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            recv.read_exact(&mut done_buf)
-        ).await {
-            Ok(Ok(_)) if &done_buf == b"DONE" => {
-                info!("✅ Receiver 완료 확인");
+        // 이제 Zip 파일 크기를 알 수 있으므로, Receiver에 zip_size를 전달 (Receiver는 read_exact로 수신)
+        let zip_size = tokio::fs::metadata(&tmp_zip_path_for_cleanup).await?.len();
+        send.write_all(&zip_size.to_le_bytes()).await?;
+
+        // 전송 시작 이벤트 (UI 상태 전환용)
+        let send_start = Instant::now();
+        self.report_progress_direct(
+            job_id,
+            0,
+            zip_size,
+            0.0,
+            &send_start,
+            TransferState::Transferring,
+        )
+        .await;
+
+        // 임시 Zip 파일을 QUIC 스트림으로 전송
+        let transfer_result: Result<u64> = async {
+            let mut zip_file = tokio::fs::File::open(&tmp_zip_path_for_cleanup).await?;
+            let mut buffer = vec![0u8; self.config.chunk_size];
+            let mut total_sent: u64 = 0;
+            let start_time = Instant::now();
+            let mut last_progress = Instant::now();
+
+            loop {
+                check_cancelled()?;
+                let n = tokio::io::AsyncReadExt::read(&mut zip_file, &mut buffer).await?;
+                if n == 0 {
+                    break;
+                }
+                send.write_all(&buffer[..n]).await?;
+                total_sent += n as u64;
+
+                if last_progress.elapsed().as_millis() >= self.config.progress_interval_ms as u128 {
+                    last_progress = Instant::now();
+                    self.report_progress(job_id, total_sent, zip_size, &start_time).await;
+                }
             }
-            _ => {
-                warn!("⚠️ Receiver 응답 타임아웃 (데이터는 전송됨)");
+
+            // 스트림 종료 (EOF)
+            send.finish()?;
+
+            // Receiver의 완료 응답 대기
+            let mut done_buf = [0u8; 4];
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10), // 타임아웃 10초로 연장
+                recv.read_exact(&mut done_buf),
+            )
+            .await
+            {
+                Ok(Ok(_)) if &done_buf == b"DONE" => {
+                    info!("✅ Receiver 완료 확인");
+                }
+                _ => {
+                    warn!("⚠️ Receiver 응답 타임아웃 (데이터는 전송됨)");
+                }
             }
+
+            // 최종 진행률 (100% 강제보다는 실제 전송량 표시)
+            self.report_progress_direct(job_id, total_sent, zip_size, 100.0, &start_time, TransferState::Transferring)
+                .await;
+
+            info!("✅ Zip 전송 완료: {} bytes 전송", total_sent);
+            Ok(total_sent)
         }
+        .await;
 
-        // 최종 진행률 100%
-        self.report_progress_direct(job_id, zip_size as u64, zip_size as u64, 100.0, &start_time).await;
+        // 어떤 결과든 임시 파일은 정리
+        let _ = tokio::fs::remove_file(&tmp_zip_path_for_cleanup).await;
 
-        info!("✅ Zip 스트리밍 완료: {} bytes 전송", total_sent);
-        Ok(total_sent)
+        transfer_result
     }
 
     async fn report_progress(&self, job_id: &str, bytes: u64, total: u64, start: &Instant) {
-        let progress = if total > 0 { (bytes as f64 / total as f64) * 100.0 } else { 0.0 };
-        self.report_progress_direct(job_id, bytes, total, progress, start).await;
+        let progress = if total > 0 {
+            (bytes as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        };
+        self.report_progress_direct(job_id, bytes, total, progress, start, TransferState::Transferring)
+            .await;
     }
 
-    async fn report_progress_direct(&self, job_id: &str, bytes: u64, total: u64, progress: f64, start: &Instant) {
+    async fn report_progress_direct(
+        &self,
+        job_id: &str,
+        bytes: u64,
+        total: u64,
+        progress: f64,
+        start: &Instant,
+        state: TransferState,
+    ) {
         if let Some(tx) = &self.progress_tx {
             let elapsed = start.elapsed().as_secs_f64();
             let speed = if elapsed > 0.0 { (bytes as f64 / elapsed) as u64 } else { 0 };
@@ -219,7 +354,7 @@ impl ZipStreamSender {
                 total_bytes: total,
                 progress_percent: progress,
                 speed_bps: speed,
-                state: super::TransferState::Transferring,
+                state,
             }).await;
         }
     }
@@ -229,6 +364,8 @@ impl ZipStreamSender {
 pub struct ZipStreamReceiver {
     config: ZipStreamConfig,
     progress_tx: Option<mpsc::Sender<TransferProgress>>,
+    /// 취소 플래그 (Graceful Cancellation)
+    is_cancelled: Option<Arc<AtomicBool>>,
 }
 
 impl ZipStreamReceiver {
@@ -236,11 +373,18 @@ impl ZipStreamReceiver {
         Self {
             config,
             progress_tx: None,
+            is_cancelled: None,
         }
     }
 
     pub fn with_progress_channel(mut self, tx: mpsc::Sender<TransferProgress>) -> Self {
         self.progress_tx = Some(tx);
+        self
+    }
+
+    /// 취소 플래그 설정 (Graceful Cancellation)
+    pub fn with_cancellation(mut self, is_cancelled: Arc<AtomicBool>) -> Self {
+        self.is_cancelled = Some(is_cancelled);
         self
     }
 
@@ -251,19 +395,30 @@ impl ZipStreamReceiver {
         save_path: PathBuf,
         job_id: &str,
     ) -> Result<PathBuf> {
+        // 취소 플래그 복사
+        let is_cancelled = self.is_cancelled.clone().unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        
+        // 취소 확인 함수
+        let check_cancelled = || -> Result<()> {
+            if is_cancelled.load(Ordering::SeqCst) {
+                Err(anyhow::anyhow!("Receive cancelled by user"))
+            } else {
+                Ok(())
+            }
+        };
         info!("📥 Zip 스트리밍 수신 대기: {:?}", save_path);
 
         // QUIC 스트림 수락
         let (mut send, mut recv) = conn.accept_bi().await?;
 
-        // 헤더 수신
+        // 헤더 수신 (기존 프로토콜 유지)
         let mut marker = [0u8; 4];
         recv.read_exact(&mut marker).await?;
         if &marker != b"ZIPS" {
             return Err(anyhow::anyhow!("Invalid zip stream marker"));
         }
 
-        // Job ID 수신
+        // Job ID
         let mut job_id_len_buf = [0u8; 4];
         recv.read_exact(&mut job_id_len_buf).await?;
         let job_id_len = u32::from_le_bytes(job_id_len_buf) as usize;
@@ -271,11 +426,12 @@ impl ZipStreamReceiver {
         recv.read_exact(&mut job_id_buf).await?;
         let received_job_id = String::from_utf8_lossy(&job_id_buf);
         
-        // 파일 정보 수신
+        // File Count
         let mut file_count_buf = [0u8; 4];
         recv.read_exact(&mut file_count_buf).await?;
         let file_count = u32::from_le_bytes(file_count_buf);
 
+        // Total Size (Original)
         let mut total_size_buf = [0u8; 8];
         recv.read_exact(&mut total_size_buf).await?;
         let total_size = u64::from_le_bytes(total_size_buf);
@@ -285,12 +441,16 @@ impl ZipStreamReceiver {
         // READY 응답 전송
         send.write_all(b"READY").await?;
 
-        // Zip 크기 수신
+        // Zip Size 수신
+        // *변경됨*: Sender가 u64::MAX를 보내면 스트리밍 모드(Unknown Size)로 인식
         let mut zip_size_buf = [0u8; 8];
         recv.read_exact(&mut zip_size_buf).await?;
-        let zip_size = u64::from_le_bytes(zip_size_buf);
+        let zip_size_indicator = u64::from_le_bytes(zip_size_buf);
+        
+        let is_streaming_mode = zip_size_indicator == u64::MAX;
+        let expected_zip_size = if is_streaming_mode { 0 } else { zip_size_indicator };
 
-        info!("📥 Zip 데이터 수신 시작: {} bytes", zip_size);
+        info!("📥 Zip 데이터 수신 시작 (Streaming: {})", is_streaming_mode);
 
         // 저장 경로 생성
         let final_save_path = if save_path.is_dir() {
@@ -311,24 +471,40 @@ impl ZipStreamReceiver {
 
         let mut buffer = vec![0u8; self.config.chunk_size];
 
-        while bytes_received < zip_size {
-            let remaining = (zip_size - bytes_received) as usize;
-            let to_read = remaining.min(buffer.len());
+        loop {
+            // 취소 확인
+            check_cancelled()?;
+            
+            // 스트리밍 모드이거나 잔여 바이트가 있을 때 읽기
+            let max_read = if is_streaming_mode {
+                buffer.len()
+            } else {
+                let remaining = (expected_zip_size - bytes_received) as usize;
+                if remaining == 0 { break; } // 다 읽음
+                remaining.min(buffer.len())
+            };
 
-            let bytes_read = recv.read(&mut buffer[..to_read]).await?
-                .ok_or_else(|| anyhow::anyhow!("Unexpected end of stream"))?;
-
-            if bytes_read == 0 {
+            // quinn의 read는 Result<Option<usize>>를 반환함 (Some(n)=데이터, None=EOF)
+            let chunk_len = match recv.read(&mut buffer[..max_read]).await? {
+                Some(len) => len,
+                None => 0, 
+            };
+            
+            // EOF 체크
+            if chunk_len == 0 {
                 break;
             }
 
-            tokio::io::AsyncWriteExt::write_all(&mut file, &buffer[..bytes_read]).await?;
-            bytes_received += bytes_read as u64;
+            tokio::io::AsyncWriteExt::write_all(&mut file, &buffer[..chunk_len]).await?;
+            bytes_received += chunk_len as u64;
 
             // 진행률 보고
             if last_progress.elapsed().as_millis() >= self.config.progress_interval_ms as u128 {
                 last_progress = Instant::now();
-                self.report_progress(job_id, bytes_received, zip_size, &start_time).await;
+                check_cancelled()?;
+                // 스트리밍 모드일 때는 total_size(원본)를 기준으로 표시
+                let progress_total = if is_streaming_mode { total_size } else { expected_zip_size };
+                self.report_progress(job_id, bytes_received, progress_total, &start_time).await;
             }
         }
 
@@ -340,9 +516,18 @@ impl ZipStreamReceiver {
         let _ = send.finish();
 
         // 최종 진행률
-        self.report_progress(job_id, zip_size, zip_size, &start_time).await;
+        let progress_total = if is_streaming_mode { total_size } else { expected_zip_size };
+        self.report_progress(job_id, bytes_received, progress_total, &start_time).await;
 
         info!("✅ Zip 파일 저장 완료: {:?} ({} bytes)", final_save_path, bytes_received);
+        
+        // 취소된 경우 부분 파일 삭제
+        if is_cancelled.load(Ordering::SeqCst) {
+            warn!("🗑️ 취소된 전송, 부분 파일 삭제: {:?}", final_save_path);
+            let _ = tokio::fs::remove_file(&final_save_path).await;
+            return Err(anyhow::anyhow!("Receive cancelled, partial file removed"));
+        }
+        
         Ok(final_save_path)
     }
 

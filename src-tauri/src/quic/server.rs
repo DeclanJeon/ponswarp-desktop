@@ -163,6 +163,8 @@ impl QuicServer {
         transport_config.max_concurrent_bidi_streams(128u32.into());
         transport_config.max_concurrent_uni_streams(64u32.into());
         transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(120).try_into()?));
+        // Zip 패키징 등 "앱 레벨 무응답" 구간에서도 연결 유지
+        transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
         
         // 윈도우 크기 대폭 증가 - Head-of-Line Blocking 방지
         // - receive_window: 연결당 최대 수신 버퍼 (512MB)
