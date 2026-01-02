@@ -1471,6 +1471,7 @@ async fn receive_zip_stream_transfer(
     peer_id: String,
     save_dir: String,
     job_id: String,
+    zip_name: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     // 연결 가져오기
@@ -1499,7 +1500,21 @@ async fn receive_zip_stream_transfer(
     });
 
     // 수신 실행
-    let save_path = PathBuf::from(&save_dir);
+    let mut save_path = PathBuf::from(&save_dir);
+    if let Some(name) = zip_name {
+        let file_name = std::path::Path::new(&name)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string());
+        if let Some(file_name) = file_name {
+            // zip 파일명은 항상 .zip을 보장
+            let file_name = if file_name.to_lowercase().ends_with(".zip") {
+                file_name
+            } else {
+                format!("{}.zip", file_name)
+            };
+            save_path = save_path.join(file_name);
+        }
+    }
     let result_path = receiver.receive_zip_stream(&conn, save_path, &job_id).await
         .map_err(|e| format!("Zip 스트리밍 수신 실패: {}", e))?;
 
@@ -1521,16 +1536,23 @@ async fn receive_zip_stream_transfer(
 async fn extract_zip_file(
     zip_path: String,
     output_dir: String,
+    remove_zip: Option<bool>,
 ) -> Result<Vec<String>, String> {
     let zip_path = PathBuf::from(&zip_path);
     let output_dir = PathBuf::from(&output_dir);
 
+    let zip_path_for_extract = zip_path.clone();
     // 블로킹 작업이므로 spawn_blocking 사용
     let result = tokio::task::spawn_blocking(move || {
-        extract_zip_to_directory(&zip_path, &output_dir)
-    }).await
+        extract_zip_to_directory(&zip_path_for_extract, &output_dir)
+    })
+    .await
         .map_err(|e| format!("작업 실행 실패: {}", e))?
         .map_err(|e| format!("압축 해제 실패: {}", e))?;
+
+    if remove_zip.unwrap_or(false) {
+        let _ = tokio::fs::remove_file(&zip_path).await;
+    }
 
     Ok(result.into_iter().map(|p| p.to_string_lossy().to_string()).collect())
 }

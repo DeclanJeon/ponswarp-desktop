@@ -242,13 +242,20 @@ const SenderView: React.FC<SenderViewProps> = () => {
           console.log(`[SenderView] Starting transfer with ID: ${batchId}`);
           console.log(`[SenderView] File count: ${files.length}`);
 
+          const zipRootDir = (() => {
+            const rootName = manifestRef.current?.rootName;
+            if (!rootName) return undefined;
+            return rootName.endsWith('.zip') ? rootName.slice(0, -4) : rootName;
+          })();
+
           // 🆕 [핵심 변경] startTransferDispatcher 사용 (자동 분기)
           // - 단일 파일: 기존 방식
           // - 다중 파일: Zip 스트리밍
           await nativeTransferService.startTransferDispatcher(
             files,
             data.peerId,
-            batchId
+            batchId,
+            { zipRootDir }
           );
 
           // 완료 처리
@@ -615,15 +622,18 @@ const SenderView: React.FC<SenderViewProps> = () => {
       console.log('[SenderView] 📁 Opening folder selection dialog...');
 
       // 1. Tauri 폴더 다이얼로그 오픈
-      const selected = await invoke<string | null>('open_file_dialog', {
+      const selected = await invoke<string[] | null>('open_file_dialog', {
         multiple: false,
         directory: true,
       });
 
       if (!selected) return;
 
-      const folderPath = selected;
+      const folderPath = Array.isArray(selected) ? selected[0] : selected;
+      if (!folderPath) return;
       console.log('[SenderView] 📁 Selected folder root:', folderPath);
+      const folderName =
+        folderPath.split(/[\\/]/).filter(Boolean).pop() || 'Folder';
 
       // 2. Rust 측 스캔
       const scannedFiles = await invoke<any[]>('scan_folder', {
@@ -656,7 +666,8 @@ const SenderView: React.FC<SenderViewProps> = () => {
             file: dummyFile,
             path: fullPath, // 절대 경로 (전송 시 사용)
             nativePath: fullPath, // 🆕 명시적 절대 경로 (전송 시 사용)
-            relativePath: item.path, // 상대 경로 (Manifest용)
+            // 폴더 전송은 루트 폴더명을 포함해야 Receiver가 동일한 폴더 구조로 복원 가능
+            relativePath: `${folderName}/${item.path}`.replace(/\\/g, '/'),
             nativeSize: size, // 실제 파일 크기
             name: name,
             lastModified: Date.now(),
@@ -847,10 +858,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
               // [수정] 클릭 시 Native 모드면 다이얼로그, 아니면 input 클릭
-              onClick={e => {
-                // 이벤트 버블링 방지
-                if (e.target !== e.currentTarget) return;
-
+              onClick={() => {
                 if (isNativeMode) {
                   handleNativeFileSelect();
                 } else {
@@ -890,8 +898,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
               <div className="flex flex-col sm:flex-row gap-3 w-full max-w-sm">
                 <button
                   onClick={e => {
-                    // 이벤트 버블링 방지
-                    if (e.target !== e.currentTarget) return;
+                    e.stopPropagation();
 
                     if (isNativeMode) {
                       handleNativeFileSelect();
@@ -909,8 +916,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
 
                 <button
                   onClick={e => {
-                    // 이벤트 버블링 방지
-                    if (e.target !== e.currentTarget) return;
+                    e.stopPropagation();
 
                     if (isNativeMode) {
                       handleNativeFolderSelect();

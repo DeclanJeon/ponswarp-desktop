@@ -559,7 +559,8 @@ class NativeTransferService {
   async startTransferDispatcher(
     files: any[],
     peerId: string,
-    jobId?: string
+    jobId?: string,
+    options?: { zipRootDir?: string }
   ): Promise<void> {
     if (this.isTransferring || this.isZipping) {
       logWarn('[NativeTransfer]', 'Transfer already in progress.');
@@ -585,7 +586,13 @@ class NativeTransferService {
       this.emit('status', 'PREPARING');
 
       try {
-        await this.sendZipStreamTransfer(files, peerId, transferId, 1);
+        await this.sendZipStreamTransfer(
+          files,
+          peerId,
+          transferId,
+          1,
+          options?.zipRootDir
+        );
 
         this.isZipping = false;
         this.emit('status', 'COMPLETED');
@@ -612,7 +619,8 @@ class NativeTransferService {
     files: any[],
     peerId: string,
     jobId: string,
-    compressionLevel: number = 1
+    compressionLevel: number = 1,
+    zipRootDir?: string
   ): Promise<number> {
     if (!this.connected || !peerId) {
       throw new Error('피어에 연결되어 있지 않습니다.');
@@ -624,13 +632,32 @@ class NativeTransferService {
     );
 
     try {
+      const normalizeEntryPath = (entry: string) => entry.replace(/\\/g, '/');
+      const applyRootDir = (entry: string) => {
+        if (!zipRootDir) return entry;
+        const normalizedEntry = normalizeEntryPath(entry);
+        const normalizedRoot = normalizeEntryPath(zipRootDir).replace(/\/+$/, '');
+        if (!normalizedRoot) return normalizedEntry;
+        if (
+          normalizedEntry === normalizedRoot ||
+          normalizedEntry.startsWith(`${normalizedRoot}/`)
+        ) {
+          return normalizedEntry;
+        }
+        return `${normalizedRoot}/${normalizedEntry}`;
+      };
+
       // Rust 백엔드 호출
       const bytesSent = await invoke<number>('send_zip_stream_transfer', {
         peerId,
         files: files.map(f => ({
           nativePath: f.nativePath || f.path,
-          relativePath:
-            f.relativePath || f.name || f.path?.split(/[\\/]/).pop(),
+          // Zip 엔트리 경로: 폴더/다중파일 전송은 rootDir로 감싸서 수신측에서 1개 폴더로 복원되도록 함
+          relativePath: applyRootDir(
+            normalizeEntryPath(
+              f.relativePath || f.name || f.path?.split(/[\\/]/).pop()
+            )
+          ),
           nativeSize: f.nativeSize || f.size || 0,
           name: f.name,
         })),
@@ -653,7 +680,8 @@ class NativeTransferService {
    */
   async receiveZipStreamTransfer(
     saveDir: string,
-    jobId: string
+    jobId: string,
+    zipName?: string
   ): Promise<string> {
     if (!this.connected || !this.currentPeerId) {
       throw new Error('피어에 연결되어 있지 않습니다.');
@@ -666,6 +694,7 @@ class NativeTransferService {
         peerId: this.currentPeerId,
         saveDir,
         jobId,
+        zipName,
       });
 
       logInfo('[NativeTransfer]', `✅ Zip 파일 저장 완료: ${savedPath}`);
@@ -688,6 +717,7 @@ class NativeTransferService {
       const extractedFiles = await invoke<string[]>('extract_zip_file', {
         zipPath,
         outputDir,
+        removeZip: true,
       });
 
       logInfo(

@@ -625,9 +625,31 @@ const ReceiverView: React.FC = () => {
 
           // Zip 스트리밍 수신
           nativeTransferService
-            .receiveZipStreamTransfer(saveDir, transferId)
-            .then(savedPath => {
+            .receiveZipStreamTransfer(saveDir, transferId, (manifest as any).rootName)
+            .then(async savedPath => {
               console.log('[ReceiverView] ✅ Zip 파일 저장 완료:', savedPath);
+
+              // 폴더/다중 파일 전송은 zip으로 묶여 오므로, 수신 후 자동으로 압축 해제하여 실제 폴더 구조로 저장
+              try {
+                const extracted = await nativeTransferService.extractZipFile(
+                  savedPath,
+                  saveDir
+                );
+                console.log(
+                  '[ReceiverView] ✅ Zip 압축 해제 완료:',
+                  extracted.length
+                );
+              } catch (extractErr: any) {
+                console.error(
+                  '[ReceiverView] Zip 압축 해제 실패:',
+                  extractErr
+                );
+                setErrorMsg(extractErr?.message || 'Zip extract failed');
+                setStatus('ERROR');
+                setIsWaitingForSender(false);
+                return;
+              }
+
               setStatus('DONE');
               setIsWaitingForSender(false);
             })
