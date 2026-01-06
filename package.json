@@ -44,7 +44,7 @@
     "simple-peer": "^9.11.1",
     "streamsaver": "^2.0.6",
     "three": "^0.181.2",
-    "zustand": "^5.0.8"
+    "zustand": "^5.0.9"
   },
   "devDependencies": {
     "@esbuild-plugins/node-globals-polyfill": "^0.2.3",
