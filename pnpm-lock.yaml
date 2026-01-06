@@ -42,8 +42,8 @@ importers:
         specifier: ^0.555.0
         version: 0.555.0(react@19.2.0)
       pons-core-wasm:
-        specifier: file:./lib/wasm
-        version: file:lib/wasm
+        specifier: ./lib/wasm
+        version: link:lib/wasm
       process:
         specifier: ^0.11.10
         version: 0.11.10
@@ -2118,9 +2118,6 @@ packages:
   picomatch@4.0.3:
     resolution: {integrity: sha512-5gTmgEY/sqK6gFXLIsQNH19lWb4ebPDLA4SdLP7dsWkIXHWlG66oPuVvXSGFPppYZz8ZDZq0dYYrbHfBCVUb1Q==}
     engines: {node: '>=12'}
-
-  pons-core-wasm@file:lib/wasm:
-    resolution: {directory: lib/wasm, type: directory}
 
   possible-typed-array-names@1.1.0:
     resolution: {integrity: sha512-/+5VFTchJDoVj3bhoqi6UeymcD00DAwb1nJwamzPvHEszJ4FpF6SNNbUbOS8yI56qHzdV8eK0qEfOSiodkTdxg==}
@@ -4814,8 +4811,6 @@ snapshots:
   picomatch@2.3.1: {}
 
   picomatch@4.0.3: {}
-
-  pons-core-wasm@file:lib/wasm: {}
 
   possible-typed-array-names@1.1.0: {}
 

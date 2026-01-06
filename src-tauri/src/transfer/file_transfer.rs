@@ -7,12 +7,16 @@ use std::fs::{self, File as StdFile};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::{mpsc, RwLock};
 use anyhow::Result;
 use tracing::{info, warn};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use hex;
+use crate::protocol::commands::{TransferRequest, TransferResponse};
 
 /// 전송 상태
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -75,7 +79,74 @@ impl FileStreamManager {
     }
 }
 
-/// 파일 전송 엔진
+/// 전송 승인 관리자
+pub struct TransferApprovalManager {
+    pub pending_requests: Arc<RwLock<HashMap<String, TransferRequest>>>,
+    pub approval_tx: Arc<RwLock<HashMap<String, mpsc::Sender<TransferResponse>>>>,
+    expiry_duration: Duration,
+}
+
+impl TransferApprovalManager {
+    pub fn new() -> Self {
+        Self {
+            pending_requests: Arc::new(RwLock::new(HashMap::new())),
+            approval_tx: Arc::new(RwLock::new(HashMap::new())),
+            expiry_duration: Duration::from_secs(30), // 30초 타임아웃
+        }
+    }
+
+    /// 전송 요청 등록 (Receiver에서 호출)
+    pub async fn register_request(
+        &self,
+        request: TransferRequest,
+    ) -> (String, mpsc::Receiver<TransferResponse>) {
+        let job_id = request.job_id.clone();
+        let (tx, rx) = mpsc::channel(1);
+
+        self.pending_requests.write().await.insert(job_id.clone(), request);
+        self.approval_tx.write().await.insert(job_id.clone(), tx);
+
+        (job_id, rx)
+    }
+
+    /// 승인/거절 처리 (Receiver UI에서 호출)
+    pub async fn approve(
+        &self,
+        job_id: &str,
+        approved: bool,
+        reason: Option<String>,
+    ) -> Result<(), String> {
+        let response = TransferResponse {
+            job_id: job_id.to_string(),
+            approved,
+            reason,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+
+        let tx = {
+            let map = self.approval_tx.read().await;
+            map.get(job_id).cloned()
+        };
+
+        if let Some(tx) = tx {
+            tx.send(response).await.map_err(|e| e.to_string())?;
+            self.cleanup(job_id).await;
+            Ok(())
+        } else {
+            Err("Request not found".to_string())
+        }
+    }
+
+    async fn cleanup(&self, job_id: &str) {
+        self.pending_requests.write().await.remove(job_id);
+        self.approval_tx.write().await.remove(job_id);
+    }
+}
+
+    /// 파일 전송 엔진
 pub struct FileTransferEngine {
     state: Arc<RwLock<TransferState>>,
     progress_tx: Option<mpsc::Sender<TransferProgress>>,
@@ -147,6 +218,27 @@ impl FileTransferEngine {
 
         info!("📤 파일 전송 시작: {} ({} bytes)", file_name, total_size);
 
+        // SHA-256 해시 계산 (파일 무결성 검증을 위해)
+        let mut hasher = Sha256::new();
+        let mut reader = BufReader::with_capacity(4 * 1024 * 1024, file);
+        let mut buffer = vec![0u8; CHUNK_SIZE];
+
+        loop {
+            match reader.read(&mut buffer).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    hasher.update(&buffer[..n]);
+                }
+                Err(e) => return Err(anyhow::anyhow!("해시 계산 중 파일 읽기 오류: {}", e)),
+            }
+        }
+
+        let checksum = hex::encode(hasher.finalize());
+        info!("🔐 SHA-256 해시 계산 완료: {}", checksum);
+
+        // 파일 포인터를 처음으로 되돌림 (재전송을 위해)
+        let mut file = File::open(&file_path).await?;
+
         // 매니페스트 전송
         let manifest = TransferManifest {
             job_id: job_id.to_string(),
@@ -154,7 +246,7 @@ impl FileTransferEngine {
                 name: file_name.clone(),
                 size: total_size,
                 mime_type: None,
-                checksum: None,
+                checksum: Some(checksum),
             }],
             total_size,
             is_folder: false,
@@ -285,6 +377,7 @@ impl FileTransferEngine {
         let file_name = &manifest.files[0].name;
         let total_size = manifest.total_size;
         let save_path = save_dir.join(file_name);
+        let expected_checksum = manifest.files[0].checksum.clone();
 
         // 저장 디렉토리 생성
         if let Some(parent) = save_path.parent() {
@@ -304,10 +397,14 @@ impl FileTransferEngine {
         let start_time = std::time::Instant::now();
         let mut last_progress_time = std::time::Instant::now();
 
+        // 수신하면서 SHA-256 해시 계산
+        let mut hasher = Sha256::new();
+
         loop {
             match recv.read(&mut buffer).await? {
                 Some(n) if n > 0 => {
                     writer.write_all(&buffer[..n]).await?;
+                    hasher.update(&buffer[..n]);
                     bytes_received += n as u64;
 
                     // 진행률 보고 (200ms마다 - UI 스로틀링과 동기화)
@@ -325,6 +422,26 @@ impl FileTransferEngine {
                 }
                 _ => break,
             }
+        }
+
+        // 해시 검증
+        let calculated_checksum = hex::encode(hasher.finalize());
+
+        if let Some(ref expected) = expected_checksum {
+            if calculated_checksum != *expected {
+                // 해시 불일치 - 파일 삭제 후 에러 반환
+                warn!("🔐 해시 불일치! 예상: {}, 계산: {}", expected, calculated_checksum);
+                tokio::fs::remove_file(&save_path).await?;
+                return Err(anyhow::anyhow!(
+                    "파일 무결성 검증 실패: 해시 불일치\n예상: {}\n계산: {}",
+                    expected,
+                    calculated_checksum
+                ));
+            } else {
+                info!("✅ SHA-256 해시 검증 성공: {}", calculated_checksum);
+            }
+        } else {
+            info!("⚠️  매니페스트에 체크섬이 없습니다. 검증 스킵.");
         }
 
         writer.flush().await?;

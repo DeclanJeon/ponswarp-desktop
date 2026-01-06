@@ -3111,6 +3111,7 @@ dependencies = [
  "mdns-sd",
  "memmap2",
  "num_cpus",
+ "parking_lot",
  "quinn",
  "rand 0.8.5",
  "rcgen",

@@ -50,6 +50,8 @@ pub struct AppState {
     relay_engine: Arc<RwLock<Option<RelayEngine>>>,
     // 🆕 파일 전송 엔진
     file_transfer: Arc<RwLock<Option<FileTransferEngine>>>,
+    // 🆕 전송 승인 관리자 (핸드쉐이크 승인)
+    transfer_approval: Arc<crate::transfer::file_transfer::TransferApprovalManager>,
     // 🆕 파일 스트림 관리자 (다중 파일 쓰기)
     file_stream_manager: Arc<FileStreamManager>,
     // 🆕 활성 QUIC 연결 (피어 전송용)
@@ -1365,6 +1367,7 @@ async fn send_zip_stream_transfer(
     files: Vec<serde_json::Value>,
     job_id: String,
     compression_level: Option<u32>,
+    transfer_type: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<u64, String> {
     // 연결 가져오기
@@ -1465,6 +1468,42 @@ async fn send_zip_stream_transfer(
     Ok(bytes_sent)
 }
 
+/// 🆕 폴더 전송 (Sender)
+#[tauri::command]
+async fn send_folder_transfer(
+    peer_id: String,
+    folder_path: String,
+    job_id: String,
+    compression_level: Option<u32>,
+    state: tauri::State<'_, AppState>,
+) -> Result<u64, String> {
+    info!("📁 폴더 전송 시작: {} -> {}", folder_path, peer_id);
+
+    let folder_name = std::path::Path::new(&folder_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    let files = scan_folder(folder_path.clone())
+        .map_err(|e| format!("폴더 스캔 실패: {}", e))?;
+
+    if files.is_empty() {
+        return Err("전송할 파일이 없습니다.".to_string());
+    }
+
+    info!("📂 {} 개 파일 스캔 완료", files.len());
+
+    send_zip_stream_transfer(
+        peer_id,
+        files,
+        job_id,
+        compression_level,
+        Some("folder".to_string()),
+        state,
+    ).await
+}
+
 /// 🆕 Zip 스트리밍으로 파일 수신 (Receiver)
 #[tauri::command]
 async fn receive_zip_stream_transfer(
@@ -1472,8 +1511,12 @@ async fn receive_zip_stream_transfer(
     save_dir: String,
     job_id: String,
     zip_name: Option<String>,
+    transfer_type: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
+    let transfer_type = transfer_type.unwrap_or_else(|| "zip_file".to_string());
+    let is_folder_transfer = transfer_type == "folder";
+
     // 연결 가져오기
     let conn = {
         let connections = state.active_connections.read().await;
@@ -1483,10 +1526,10 @@ async fn receive_zip_stream_transfer(
             .clone()
     };
 
-    info!("📥 Zip 스트리밍 수신 대기: {} -> {}", peer_id, save_dir);
+    info!("📥 Zip 스트리밍 수신 대기: {} -> {} (type: {})", peer_id, save_dir, transfer_type);
 
     let config = ZipStreamConfig::default();
-    
+
     // 진행률 채널 설정
     let (tx, mut rx) = mpsc::channel::<TransferProgress>(100);
     let receiver = ZipStreamReceiver::new(config).with_progress_channel(tx);
@@ -1519,6 +1562,39 @@ async fn receive_zip_stream_transfer(
         .map_err(|e| format!("Zip 스트리밍 수신 실패: {}", e))?;
 
     let result_str = result_path.to_string_lossy().to_string();
+
+    if is_folder_transfer {
+        info!("📂 폴더 전송 감지, 압축 해제 시작");
+        let output_dir = if let Some(parent) = result_path.parent() {
+            parent.join(result_path.file_stem().unwrap_or_default())
+        } else {
+            PathBuf::from(&save_dir)
+        };
+
+        let result_path_clone = result_path.clone();
+        let output_dir_clone = output_dir.clone();
+
+        let extracted_files = tokio::task::spawn_blocking(move || {
+            extract_zip_to_directory(&result_path_clone, &output_dir_clone)
+        })
+        .await
+        .map_err(|e| format!("압축 해제 작업 실패: {}", e))?
+        .map_err(|e| format!("압축 해제 실패: {}", e))?;
+
+        let _ = tokio::fs::remove_file(&result_path).await;
+
+        let extracted_paths = extracted_files.iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        let _ = state.app_handle.emit("folder-extracted", serde_json::json!({
+            "jobId": job_id,
+            "extractedPath": output_dir.to_string_lossy().to_string(),
+            "extractedFiles": extracted_paths,
+        }));
+
+        info!("✅ 폴더 압축 해제 완료: {} 파일", extracted_files.len());
+    }
 
     // 완료 이벤트
     let _ = state.app_handle.emit("transfer-complete", serde_json::json!({
@@ -1573,6 +1649,34 @@ async fn cancel_transfer(
     }
 }
 
+/// 🆕 대기 중인 전송 요청 목록 조회
+#[tauri::command]
+async fn get_pending_transfers(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<crate::protocol::commands::TransferRequest>, String> {
+    let approval_manager = state.transfer_approval.as_ref();
+
+    let pending_requests = approval_manager.pending_requests.read().await;
+    let pending = pending_requests.values().cloned().collect();
+
+    Ok(pending)
+}
+
+#[tauri::command]
+async fn approve_transfer(
+    job_id: String,
+    approved: bool,
+    reason: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let approval_manager = state.transfer_approval.as_ref();
+
+    approval_manager
+        .approve(&job_id, approved, reason)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     info!("🚀 PonsWarp Enterprise 시작 중...");
@@ -1605,6 +1709,7 @@ pub fn run() {
                 udp_core: Arc::new(RwLock::new(None)),
                 relay_engine: Arc::new(RwLock::new(None)),
                 file_transfer: Arc::new(RwLock::new(None)),
+                transfer_approval: Arc::new(crate::transfer::file_transfer::TransferApprovalManager::new()),
                 file_stream_manager: Arc::new(FileStreamManager::new()),
                 active_connections: Arc::new(RwLock::new(std::collections::HashMap::new())),
                 accepted_connections: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -1725,9 +1830,12 @@ pub fn run() {
             // 🆕 Zip 스트리밍 커맨드
             send_zip_stream_transfer,
             receive_zip_stream_transfer,
+            send_folder_transfer,
             extract_zip_file,
             // 🆕 작업 취소
             cancel_transfer,
+            get_pending_transfers,
+            approve_transfer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
