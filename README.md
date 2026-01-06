@@ -1,23 +1,41 @@
 # PonsWarp Desktop
 
-**File Transfer at Warp Speed. Zero Limits.**
+**Warp Speed. Zero Limits. Secured & Intelligent.**
 
-PonsWarp is a high-performance desktop application for transferring files of any size directly between devices. Powered by Tauri, Rust, and WebRTC, it bypasses server limits to offer secure, unlimited, and blazing-fast peer-to-peer transfers.
+PonsWarp is a high-performance desktop application for transferring files of any size directly between devices. Powered by Tauri (v2), Rust, and QUIC, it bypasses server limits to offer secure, unlimited, and blazing-fast peer-to-peer transfers.
+
+> **Current Status**: Beta (~82% Complete) - Security & AI Modules in active development.
 
 ## 🚀 Key Features
 
-- **Unlimited File Size**: Transfer 100GB+ files without memory crashes. Direct disk-to-disk streaming.
-- **Hyper-Fast P2P**: Utilizes WebRTC for direct connections. Gigabit speeds on LAN.
-- **End-to-End Encryption**: AES-256-GCM encryption powered by Rust (WASM) ensures your data remains private.
-- **Cross-Platform**: Built with Tauri for a lightweight, native experience on Windows, macOS, and Linux.
-- **No Cloud Storage**: Files go directly from sender to receiver. No intermediate servers.
+- **Unlimited File Size**: Transfer 100GB+ files without memory crashes using direct disk-to-disk streaming.
+- **Hyper-Fast P2P**: Utilizes **QUIC (quinn)** and **WebRTC** for multiplexed high-speed connections.
+- **Local Discovery**: Automatic peer discovery via mDNS/UDP broadcast on LAN.
+- **Cross-Platform**: Native performance on Windows, macOS, and Linux via Tauri v2.
+- **Modern UI**: Built with React 19, TypeScript, and Tailwind CSS v4.
+
+## 🚧 Roadmap to RC1
+
+We are currently working on Phase 1 & 2 to reach Release Candidate status:
+
+- **Phase 1: Security Core** (In Progress)
+  - [ ] Handshake Approval (prevent unsolicited transfers)
+  - [ ] SHA-256 Integrity Verification
+  - [ ] E2EE Encryption Enforcement
+
+- **Phase 2: Intelligence** (Planned)
+  - [ ] Local AI (Ollama) Integration for file summarization
+  - [ ] Automatic content analysis upon receipt
+
+- **Phase 3: Optimization**
+  - [ ] In-memory ZIP streaming for small file clusters
 
 ## 🛠️ Tech Stack
 
-- **Frontend**: React 19, TypeScript, Vite
-- **Backend/Core**: Rust (Tauri), WebAssembly
-- **Networking**: WebRTC, UDP/QUIC
-- **Styling**: Tailwind CSS 4
+- **Frontend**: React 19, TypeScript 5.9, Vite 7, Zustand 5, Tailwind CSS 4
+- **Backend**: Rust (1.77+), Tauri 2.9
+- **Networking**: QUIC (quinn 0.11), WebRTC, mDNS
+- **Storage**: SQLite (rusqlite) for transfer history
 
 ## 📦 Getting Started
 
@@ -32,7 +50,7 @@ PonsWarp is a high-performance desktop application for transferring files of any
 1. **Clone the repository**
 
    ```bash
-   git clone https://github.com/pons-dev/ponswarp-desktop.git
+   git clone https://github.com/ponswarp/ponswarp-desktop.git
    cd ponswarp-desktop
    ```
 
@@ -49,14 +67,21 @@ PonsWarp is a high-performance desktop application for transferring files of any
    ```
 
 4. **Build for Production**
+
    ```bash
    pnpm tauri build
    ```
 
+## 🔄 CI/CD & Versioning
+
+- **CI**: Automated builds and tests via GitHub Actions (`ci.yml`).
+- **Release**: Automated multi-platform release builds (`release.yml`) triggered by version tags.
+- **Versioning**: Managed via `scripts/release.js`, ensuring `package.json` and `tauri.conf.json` synchronization.
+
 ## 🤝 Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Please check `COMPLETION_PLAN_v2.md` for the current development roadmap.
 
 ## 📄 License
 
-Distributed under the MIT License.
+Distributed under MIT License.

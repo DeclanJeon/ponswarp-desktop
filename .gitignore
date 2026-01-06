@@ -92,3 +92,16 @@ ecosystem.config.*
 docs
 nginx.conf
 nginx.conf.*
+
+# Tauri
+src-tauri/target/
+src-tauri/Cargo.lock
+src-tauri/key.priv
+src-tauri/key.pub
+*.dmg
+*.app
+*.msi
+*.exe
+*.deb
+*.AppImage
+*.rpm
