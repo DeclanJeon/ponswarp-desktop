@@ -12,7 +12,7 @@ use std::fs::File;
 use anyhow::Result;
 use tracing::{info, warn};
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+
 
 
 
@@ -238,6 +238,7 @@ impl HighPerformanceFileSender {
 
     /// Mmap에서 데이터를 복사해오되, OS 캐시를 활용하여 고속으로 읽음
     pub fn read_block_mmap_copy(&self, block: &BlockInfo) -> Result<Vec<u8>> {
+        #[cfg(unix)]
         if let Some(mmap) = &self.mmap {
             let start = block.offset as usize;
             let end = start + block.size as usize;
@@ -257,6 +258,7 @@ impl HighPerformanceFileSender {
     ///
     /// 반환값: Vec<u8> (소유권 있는 데이터)
     pub fn read_block_owned(&self, block: &BlockInfo) -> Result<Vec<u8>> {
+        #[cfg(unix)]
         if let Some(mmap) = &self.mmap {
             let start = block.offset as usize;
             let end = start + block.size as usize;

@@ -871,7 +871,7 @@ async fn discover_bootstrap_nodes() -> Result<Vec<serde_json::Value>, String> {
 /// 🆕 네트워크 인터페이스 조회
 #[tauri::command]
 async fn get_network_interfaces() -> Result<Vec<String>, String> {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::IpAddr;
     use std::process::Command;
     
     let mut interfaces = Vec::new();
@@ -958,11 +958,11 @@ async fn get_network_interfaces() -> Result<Vec<String>, String> {
 async fn start_file_stream(
     file_id: String,
     save_path: String,
-    total_size: Option<u64>,
-    state: tauri::State<'_, AppState>,
+    _total_size: Option<u64>,
+    _state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     use std::collections::HashMap;
-    use std::sync::Mutex;
+
 
     // 파일 상태 관리를 위한 전역 상태 추가
     struct FileStreamingState {
@@ -970,7 +970,7 @@ async fn start_file_stream(
     }
 
     // AppState에 스트리밍 상태 추가 (기존 코드와 호환성 유지)
-    let file = std::fs::File::create(&save_path)
+    let _file = std::fs::File::create(&save_path)
         .map_err(|e| format!("파일 생성 실패: {}", e))?;
 
     info!("📝 파일 스트리밍 시작: {} -> {}", file_id, save_path);
@@ -987,7 +987,7 @@ async fn write_file_chunk(
     chunk: Vec<u8>,
     offset: Option<u64>,
 ) -> Result<(), String> {
-    use std::fs::{File, OpenOptions};
+    use std::fs::OpenOptions;
     use std::io::{Seek, SeekFrom, Write};
 
     // 실제 구현에서는 파일 핸들을 상태에서 관리해야 함
