@@ -95,7 +95,6 @@ nginx.conf.*
 
 # Tauri
 src-tauri/target/
-src-tauri/Cargo.lock
 src-tauri/key.priv
 src-tauri/key.pub
 *.dmg
