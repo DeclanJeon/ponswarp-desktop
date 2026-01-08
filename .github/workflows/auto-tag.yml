@@ -1,0 +1,55 @@
+name: Auto Release Tag
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'package.json'
+
+jobs:
+  auto-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Check Version and Tag
+        id: check
+        run: |
+          VERSION=$(jq -r .version package.json)
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists."
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Tag v$VERSION does not exist. Creating..."
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Sync Tauri Version and Tag
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.check.outputs.version }}"
+          
+          # Update tauri.conf.json
+          # Use a temporary file to ensure atomic write
+          jq --arg v "$VERSION" '.version = $v' src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
+          
+          # Configure Git
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          # Check if there are changes to commit
+          if [[ -n $(git status --porcelain src-tauri/tauri.conf.json) ]]; then
+            git add src-tauri/tauri.conf.json
+            git commit -m "chore: sync tauri version to $VERSION"
+            git push origin main
+          fi
+          
+          # Create and push tag
+          git tag "v$VERSION"
+          git push origin "v$VERSION"

@@ -123,8 +123,8 @@ jobs:
             file \
             libssl-dev \
             libayatana-appindicator3-dev \
-            librsvg2-dev
-
+            librsvg2-dev \
+            rpm
       - name: Install system dependencies (macOS)
         if: matrix.os == 'macos-latest'
         run: |
@@ -184,45 +184,14 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            artifacts/ponswarp-*/bundle/**/*.dmg
-            artifacts/ponswarp-*/bundle/**/*.app.tar.gz
-            artifacts/ponswarp-*/bundle/**/*.msi
-            artifacts/ponswarp-*/bundle/**/*.nsis.zip
-            artifacts/ponswarp-*/bundle/**/*.deb
-            artifacts/ponswarp-*/bundle/**/*.AppImage
-            artifacts/ponswarp-*/bundle/**/*.rpm
+            artifacts/**/*.dmg
+            artifacts/**/*.app.tar.gz
+            artifacts/**/*.msi
+            artifacts/**/*.nsis.zip
+            artifacts/**/*.exe
+            artifacts/**/*.deb
+            artifacts/**/*.AppImage
+            artifacts/**/*.rpm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  update-version:
-    name: Update Version Files
-    runs-on: ubuntu-latest
-    needs: prepare-release
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Get version from tag
-        id: get_version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
-      - name: Update package.json version
-        run: |
-          VERSION="${{ steps.get_version.outputs.version }}"
-          npm version $VERSION --no-git-tag-version
-
-      - name: Update tauri.conf.json version
-        run: |
-          VERSION="${{ steps.get_version.outputs.version }}"
-          jq --arg v "$VERSION" '.version = $v' src-tauri/tauri.conf.json > tmp.json
-          mv tmp.json src-tauri/tauri.conf.json
-
-      - name: Commit version updates
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add package.json src-tauri/tauri.conf.json
-          git commit -m "chore: update version to ${{ steps.get_version.outputs.version }}"
-          git push
