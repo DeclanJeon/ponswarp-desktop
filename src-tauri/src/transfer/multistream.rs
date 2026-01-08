@@ -14,12 +14,12 @@ use std::sync::Arc;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Instant, Duration};
 use tokio::sync::{mpsc, RwLock, Semaphore};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use anyhow::Result;
 use tracing::{info, warn, debug};
 use serde::{Deserialize, Serialize};
 
-use super::zero_copy_io::{BlockInfo, split_file_into_blocks, HighPerformanceFileSender};
+use super::zero_copy_io::{BlockInfo, HighPerformanceFileSender};
 
 /// 동시 스트림 수 (QUIC max_concurrent_bidi_streams와 연동)
 pub const MAX_CONCURRENT_STREAMS: usize = 32;

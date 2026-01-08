@@ -752,7 +752,7 @@ async fn receive_file_multistream(
 async fn get_io_engine_info() -> Result<serde_json::Value, String> {
     let engine = ZeroCopyEngine::new();
     let io_method = match engine.io_method() {
-        IoMethod::Buffered => "buffered",
+
         IoMethod::Mmap => "mmap",
         #[cfg(target_os = "linux")]
         IoMethod::IoUring => "io_uring",

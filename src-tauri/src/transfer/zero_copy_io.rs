@@ -12,14 +12,10 @@ use std::fs::File;
 use anyhow::Result;
 use tracing::{info, warn};
 
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 
-/// Zero-Copy 전송 블록 크기 (4MB - 대용량 전송에 최적화)
-pub const ZERO_COPY_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
-/// 스트림 전송 블록 크기 (16MB - QUIC 멀티스트림용)
-pub const STREAM_BLOCK_SIZE: usize = 16 * 1024 * 1024;
+
 
 /// Zero-Copy I/O 엔진
 pub struct ZeroCopyEngine {
@@ -30,8 +26,7 @@ pub struct ZeroCopyEngine {
 /// I/O 방식
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum IoMethod {
-    /// 표준 버퍼 I/O (폴백)
-    Buffered,
+
     /// Memory-mapped I/O
     Mmap,
     /// Linux io_uring (커널 5.1+)
@@ -94,74 +89,7 @@ impl ZeroCopyEngine {
     }
 }
 
-/// Memory-mapped 파일 읽기 (Zero-Copy)
-/// 
-/// 파일을 메모리에 매핑하여 커널-유저 공간 복사 없이 직접 접근합니다.
-#[cfg(unix)]
-pub struct MmapReader {
-    mmap: memmap2::Mmap,
-    offset: usize,
-    len: usize,
-}
 
-#[cfg(unix)]
-impl MmapReader {
-    /// 파일을 메모리 매핑으로 열기
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = std::fs::File::open(path)?;
-        let mmap = unsafe { memmap2::Mmap::map(&file)? };
-        let len = mmap.len();
-        
-        Ok(Self {
-            mmap,
-            offset: 0,
-            len,
-        })
-    }
-
-    /// 다음 블록 읽기 (Zero-Copy - 데이터 복사 없이 슬라이스 반환)
-    pub fn next_block(&mut self, block_size: usize) -> Option<&[u8]> {
-        if self.offset >= self.len {
-            return None;
-        }
-
-        let end = std::cmp::min(self.offset + block_size, self.len);
-        let block = &self.mmap[self.offset..end];
-        self.offset = end;
-        
-        Some(block)
-    }
-
-    /// 특정 오프셋의 블록 읽기
-    pub fn read_block_at(&self, offset: usize, block_size: usize) -> Option<&[u8]> {
-        if offset >= self.len {
-            return None;
-        }
-
-        let end = std::cmp::min(offset + block_size, self.len);
-        Some(&self.mmap[offset..end])
-    }
-
-    /// 전체 길이
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    /// 현재 오프셋
-    pub fn offset(&self) -> usize {
-        self.offset
-    }
-
-    /// 남은 바이트 수
-    pub fn remaining(&self) -> usize {
-        self.len.saturating_sub(self.offset)
-    }
-
-    /// 오프셋 리셋
-    pub fn reset(&mut self) {
-        self.offset = 0;
-    }
-}
 
 /// 블록 정보 (멀티스트림 전송용)
 #[derive(Debug, Clone)]
@@ -202,118 +130,16 @@ pub fn split_file_into_blocks(file_size: u64, block_size: usize) -> Vec<BlockInf
 // Linux io_uring 지원 (고성능 비동기 I/O)
 // ============================================================================
 
+#[allow(dead_code)]
 #[cfg(target_os = "linux")]
 pub mod linux_io {
-    use super::*;
-    use std::os::unix::io::AsRawFd;
-
-    /// Linux sendfile 시스템 콜을 사용한 Zero-Copy 전송
-    /// 
-    /// 파일 데이터를 커널 공간에서 직접 소켓으로 전송합니다.
-    /// 유저 공간으로의 복사가 발생하지 않습니다.
-    pub fn sendfile_to_buffer(
-        file: &std::fs::File,
-        offset: i64,
-        count: usize,
-        buffer: &mut [u8],
-    ) -> Result<usize> {
-        use std::io::Read;
-        
-        // sendfile은 소켓에만 사용 가능하므로, 
-        // QUIC 전송을 위해서는 mmap + 직접 전송 방식 사용
-        // 여기서는 pread를 사용하여 특정 오프셋에서 읽기
-        let fd = file.as_raw_fd();
-        
-        let bytes_read = unsafe {
-            libc::pread(
-                fd,
-                buffer.as_mut_ptr() as *mut libc::c_void,
-                count,
-                offset,
-            )
-        };
-
-        if bytes_read < 0 {
-            return Err(anyhow::anyhow!("pread failed: {}", std::io::Error::last_os_error()));
-        }
-
-        Ok(bytes_read as usize)
-    }
-
-    /// 파일 어드바이스 설정 (커널 캐시 힌트)
-    pub fn advise_sequential(file: &std::fs::File) -> Result<()> {
-        let fd = file.as_raw_fd();
-        
-        let result = unsafe {
-            libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL)
-        };
-
-        if result != 0 {
-            warn!("posix_fadvise failed: {}", result);
-        }
-
-        Ok(())
-    }
-
-    /// 파일 프리페치 (미리 읽기)
-    pub fn prefetch_range(file: &std::fs::File, offset: i64, len: usize) -> Result<()> {
-        let fd = file.as_raw_fd();
-        
-        let result = unsafe {
-            libc::posix_fadvise(fd, offset, len as i64, libc::POSIX_FADV_WILLNEED)
-        };
-
-        if result != 0 {
-            warn!("posix_fadvise WILLNEED failed: {}", result);
-        }
-
-        Ok(())
-    }
+    // Content removed as it was unused and contained unused imports
 }
 
-// ============================================================================
-// Windows Overlapped I/O 지원
-// ============================================================================
-
+#[allow(dead_code)]
 #[cfg(target_os = "windows")]
 pub mod windows_io {
-    use super::*;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::HANDLE;
-    use windows_sys::Win32::Storage::FileSystem::{
-        ReadFile, OVERLAPPED,
-    };
-
-    /// Windows Overlapped I/O를 사용한 비동기 읽기
-    pub fn read_file_overlapped(
-        file: &std::fs::File,
-        offset: u64,
-        buffer: &mut [u8],
-    ) -> Result<usize> {
-        let handle = file.as_raw_handle() as HANDLE;
-        
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        overlapped.Anonymous.Anonymous.Offset = (offset & 0xFFFFFFFF) as u32;
-        overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
-
-        let mut bytes_read: u32 = 0;
-        
-        let result = unsafe {
-            ReadFile(
-                handle,
-                buffer.as_mut_ptr() as *mut _,
-                buffer.len() as u32,
-                &mut bytes_read,
-                &mut overlapped,
-            )
-        };
-
-        if result == 0 {
-            return Err(anyhow::anyhow!("ReadFile failed: {}", std::io::Error::last_os_error()));
-        }
-
-        Ok(bytes_read as usize)
-    }
+    // Content removed as it was unused
 }
 
 // ============================================================================
@@ -348,9 +174,7 @@ impl HighPerformanceFileSender {
                 Ok(m) => {
                     // 순차 접근 힌트 제공 (Linux)
                     #[cfg(target_os = "linux")]
-                    unsafe {
-                        libc::madvise(m.as_ptr() as *mut _, m.len(), libc::MADV_SEQUENTIAL);
-                    }
+                    libc::madvise(m.as_ptr() as *mut _, m.len(), libc::MADV_SEQUENTIAL);
                     Some(Arc::new(m))
                 },
                 Err(e) => {
@@ -466,19 +290,14 @@ impl HighPerformanceFileReceiver {
             .truncate(true)
             .open(path.as_ref())?;
 
-        // 파일 크기 미리 할당 (단편화 방지)
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = file.as_raw_fd();
-            unsafe {
-                libc::posix_fallocate(fd, 0, expected_size as i64);
-            }
-        }
-
-        #[cfg(windows)]
-        {
-            file.set_len(expected_size)?;
+        // 파일 크기 미리 할당 (단편화 방지 및 공간 확보)
+        // set_len은 대부분의 플랫폼에서 truncate/ftruncate/SetEndOfFile을 호출합니다.
+        // posix_fallocate가 성능상 이점이 있을 수 있으나, 호환성을 위해 set_len을 우선 사용합니다.
+        if let Err(e) = file.set_len(expected_size) {
+            warn!("파일 크기 사전 할당 실패 (디스크 공간 부족 가능성): {}", e);
+            // 여기서 에러를 리턴하지 않고 진행하면, 쓰는 도중 에러가 날 수 있음.
+            // 하지만 Rust의 set_len은 에러를 잘 반환하므로 전파하는 것이 안전함.
+            return Err(anyhow::Error::from(e));
         }
 
         info!("📂 수신 파일 생성: {} bytes 예약", expected_size);
