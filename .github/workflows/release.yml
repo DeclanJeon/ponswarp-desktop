@@ -187,6 +187,23 @@ jobs:
           tauriScript: pnpm tauri
           args: --target ${{ matrix.target }} ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--bundles deb,rpm' || '' }}
 
+      - name: Rename artifacts for uniqueness
+        shell: bash
+        run: |
+          # macOS: Rename .app.tar.gz to include architecture to avoid collision
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            echo "Renaming macOS artifacts..."
+            find src-tauri/target/${{ matrix.target }}/release/bundle/macos -name "*.app.tar.gz" -exec mv {} src-tauri/target/${{ matrix.target }}/release/bundle/macos/PonsWarp_${{ matrix.target }}.app.tar.gz \; || true
+          fi
+
+          # Linux: Rename binary to avoid collision
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+             echo "Renaming Linux binary..."
+             if [ -f "src-tauri/target/${{ matrix.target }}/release/ponswarp" ]; then
+               mv "src-tauri/target/${{ matrix.target }}/release/ponswarp" "src-tauri/target/${{ matrix.target }}/release/ponswarp_${{ matrix.target }}"
+             fi
+          fi
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
