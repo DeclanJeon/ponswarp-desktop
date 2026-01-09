@@ -132,9 +132,15 @@ jobs:
           # Add architecture
           sudo dpkg --add-architecture arm64
 
-          # Overwrite sources.list with explicit architecture definitions
+          # Remove default ubuntu.sources (Ubuntu 24.04+) which lacks architecture restrictions and causes 404s
+          sudo rm -f /etc/apt/sources.list.d/ubuntu.sources
+
+          # Clear legacy sources.list just in case
+          sudo truncate -s 0 /etc/apt/sources.list
+
+          # Write sources with explicit architecture definitions
           # amd64: azure.archive.ubuntu.com (fastest for GH Actions)
-          echo "deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu/ noble main restricted universe multiverse" | sudo tee /etc/apt/sources.list
+          echo "deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu/ noble main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
           echo "deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu/ noble-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
           echo "deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu/ noble-backports main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
           echo "deb [arch=amd64] http://azure.archive.ubuntu.com/ubuntu/ noble-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
