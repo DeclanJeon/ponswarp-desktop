@@ -1,0 +1,446 @@
+[33mcommit 8b434db60ec5c8f47bd05003d8f6d5d22f9f8e75[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mfeature/wan[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Sun Jan 18 03:09:32 2026 +0900
+
+    ## 커밋 메시지
+    
+    ```
+    feat(signaling): TURN 설정 캐싱 및 선제 요청 추가
+    
+    시그널링 서비스에 TURN 서버 설정 캐싱 기능을 추가하여 연결 성능을 개선합니다.
+    
+    **변경사항:**
+    - SignalingService 및 UnifiedSignalingService에 turnConfigCache 필드 추가
+    - WebSocket 연결 시 즉시 TURN 설정 요청 및 캐싱 (Pre-fetching)
+    - 캐싱된 ICE 서버 목록을 반환하는 getCachedIceServers() 메서드 추가
+    - SwarmManager가 캐싱된 ICE 서버를 사용하도록 로직 수정
+    
+    **코드 품질:**
+    - native-transfer.ts 코드 포맷팅 개선 (가독성 향상)
+    - connectToDiscoveredPeer 메서드 중복 코드 제거
+    - 연결 로그에 mode: 'direct' 정보 추가
+    ```
+    
+    ---
+    
+    ## 대안 (간결 버전)
+    
+    ```
+    perf(signaling): TURN 설정 캐싱으로 연결 지연 시간 단축
+    
+    시그널링 서비스에 TURN 설정 캐싱 및 선제 요청 기능을 추가하여 연결 설정 시간을 최적화합니다.
+    ```
+
+[33mcommit 7d2d82e5b27fb3f796030dfec49eb0bfbc111e6e[m
+Author: Declan <syas0301@gmail.com>
+Date:   Sun Jan 18 03:04:04 2026 +0900
+
+    fix : lib.rs 문법 에러 수정
+
+[33mcommit a404c42329b53a2ef44082cb0d584c60d4237417[m[33m ([m[1;33mtag: [m[1;33mv1.1.21[m[33m, [m[1;31morigin/master[m[33m, [m[1;31morigin/develop[m[33m, [m[1;31morigin/HEAD[m[33m, [m[1;32mmaster[m[33m, [m[1;32mfix/ci-pnpm-setup[m[33m, [m[1;32mdevelop[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 15:47:56 2026 +0900
+
+    1.1.21
+
+[33mcommit edbcc2d723218e09042d92e5bfd8f7f1f2afef31[m[33m ([m[1;31morigin/fix/ci-pnpm-setup[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 15:47:50 2026 +0900
+
+    fix: package.json 수정 CI/CD 교정중 10
+
+[33mcommit 4ce2e9b2fa7c29b3aa13fca66ad2aaf6ece3cab6[m[33m ([m[1;33mtag: [m[1;33mv1.1.20[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 15:27:52 2026 +0900
+
+    1.1.20
+
+[33mcommit 510d08e17860b99622d5cb38b11345545736997e[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 15:27:43 2026 +0900
+
+    fix: package.json 수정 CI/CD 교정중 9
+
+[33mcommit a34a3f97e49b6259ec82e01caa5aa2f5f22c0650[m[33m ([m[1;33mtag: [m[1;33mv1.1.19[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 11:32:24 2026 +0900
+
+    1.1.19
+
+[33mcommit 4f7d5d1f988801a2281595e511a79ce3708a9246[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 11:30:27 2026 +0900
+
+    fix(ci): install qemu-user-static to support arm64 appimage bundling
+
+[33mcommit e89aaeaf11ff07e57e6145637c9c7a344f6487c0[m[33m ([m[1;33mtag: [m[1;33mv1.1.18[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 11:18:50 2026 +0900
+
+    1.1.18
+
+[33mcommit e89e6e811bc280bec8e8c0149f46151ed4641bcd[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 10:01:51 2026 +0900
+
+    fix(ci): remove ubuntu.sources and use manual sources.list for strict arch separation
+
+[33mcommit a33b43d13a0ef136781e7887d277ced7d26cbdab[m[33m ([m[1;33mtag: [m[1;33mv1.1.17[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 09:45:24 2026 +0900
+
+    1.1.17
+
+[33mcommit d891b0b352fb3ddfcd37d2f8a77922bb980b08a5[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 09:44:59 2026 +0900
+
+    fix(ci): refine apt sources with backports and azure mirrors for amd64
+
+[33mcommit b89210ac86e22e5851f92d64e0fa61c197a6b629[m[33m ([m[1;33mtag: [m[1;33mv1.1.16[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 09:08:40 2026 +0900
+
+    1.1.16
+
+[33mcommit 3cc216c27d9a75c5d7c7300e5490e9d095dca603[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 09:08:01 2026 +0900
+
+    fix(ci): update apt sources to use explicit mirrors for architecture separation
+
+[33mcommit eab99473f255db860e0cf2ee454acb0f1299af92[m[33m ([m[1;33mtag: [m[1;33mv1.1.15[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 08:58:04 2026 +0900
+
+    1.1.15
+
+[33mcommit 885c3426ab9c629781c4ee2134ed27712d8b2531[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 08:57:49 2026 +0900
+
+    fix: package.json 수정 CI/CD 교정중 8
+
+[33mcommit 66217f54dd5322ca458a392f397bcfaddaeae52f[m[33m ([m[1;33mtag: [m[1;33mv1.1.14[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 08:51:57 2026 +0900
+
+    1.1.14
+
+[33mcommit 74c8a99d42f7e26b146ef58ad48482bbc7620069[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 08:51:50 2026 +0900
+
+    fix: package.json 수정 CI/CD 교정중 7
+
+[33mcommit a273cb2f991c8ce791d79dc1a8d0f65c27299a96[m[33m ([m[1;33mtag: [m[1;33mv1.1.13[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 08:41:36 2026 +0900
+
+    1.1.13
+
+[33mcommit 64a17e75e0fc1f071376feec84a31c48679649a1[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 08:41:31 2026 +0900
+
+    fix: package.json 수정 CI/CD 교정중 6
+
+[33mcommit bda279adda6f1becdb8b8a77c4648b6d2b996f74[m[33m ([m[1;33mtag: [m[1;33mv1.1.12[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 08:23:10 2026 +0900
+
+    1.1.12
+
+[33mcommit 959aea22890579bab657a83a4a3acdfa1f1f6ea0[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 9 08:22:59 2026 +0900
+
+    fix: package.json 수정 CI/CD 교정중 5
+
+[33mcommit 3841994f64227d87935cb65bfb12a9d31f90c3e0[m[33m ([m[1;33mtag: [m[1;33mv1.1.11[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Thu Jan 8 17:37:33 2026 +0900
+
+    1.1.11
+
+[33mcommit eedc4abe1bfefddb2a51c7c125e7c4e87a061f47[m
+Author: Declan <syas0301@gmail.com>
+Date:   Thu Jan 8 17:37:28 2026 +0900
+
+    fix: configure pkg-config for aarch64 cross-compilation
+
+[33mcommit 0a34050373b9dcb2bc938a688e5e44a56cc7f071[m[33m ([m[1;33mtag: [m[1;33mv1.1.10[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Thu Jan 8 17:30:55 2026 +0900
+
+    1.1.10
+
+[33mcommit d92346426721e398454ab3284ff9985b4d87791c[m
+Author: Declan <syas0301@gmail.com>
+Date:   Thu Jan 8 17:30:43 2026 +0900
+
+    fix: package.json 수정 CI/CD 교정중 4
+
+[33mcommit 64b6f3dc6e0df6938bf877da8f4594d5aec2a3d9[m[33m ([m[1;33mtag: [m[1;33mv1.1.9[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Thu Jan 8 13:47:51 2026 +0900
+
+    1.1.9
+
+[33mcommit bedab76ecc96ba38784d64bae264ef8ca9d2aaea[m
+Author: Declan <syas0301@gmail.com>
+Date:   Thu Jan 8 13:47:41 2026 +0900
+
+    fix: package.json 수정 CI/CD 교정중 3
+
+[33mcommit 6edc3e79211f609df271c8a49fee75d3d0027461[m[33m ([m[1;33mtag: [m[1;33mv1.1.8[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Thu Jan 8 13:18:03 2026 +0900
+
+    1.1.8
+
+[33mcommit 378db8f2bb37e23281afe6da7dd9a8b698e79a9c[m
+Author: Declan <syas0301@gmail.com>
+Date:   Thu Jan 8 13:15:12 2026 +0900
+
+    fix: commit wasm artifacts and Cargo.lock for CI build
+
+[33mcommit 4b2c39074739d70ffb089d33c55b23aa7f27a69d[m[33m ([m[1;33mtag: [m[1;33mv1.1.7[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Thu Jan 8 12:53:45 2026 +0900
+
+    1.1.7
+
+[33mcommit 9c6e547ae4cfb2af1101c7167082971ef883030f[m
+Author: Declan <syas0301@gmail.com>
+Date:   Thu Jan 8 12:52:46 2026 +0900
+
+    fix: package.json 수정 CI/CD 교정중 2
+
+[33mcommit f187bb44411ff9d5e39b4e8be997249eb9d55ff5[m[33m ([m[1;33mtag: [m[1;33mv1.1.6[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Tue Jan 6 17:56:02 2026 +0900
+
+    1.1.6
+
+[33mcommit a22401dc4bb80c0567bf24fcb4d649c2a5f28250[m
+Author: Declan <syas0301@gmail.com>
+Date:   Tue Jan 6 17:55:54 2026 +0900
+
+    fix: package.json 수정 CI/CD 교정중
+
+[33mcommit c70b5fe51279b7301ebfb3e45ed1330aee0f6d49[m[33m ([m[1;33mtag: [m[1;33mv1.1.5[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Tue Jan 6 16:57:49 2026 +0900
+
+    1.1.5
+
+[33mcommit c1c4db47c9162a165b5766d0d3b75bf8d35b7978[m
+Author: Declan <syas0301@gmail.com>
+Date:   Tue Jan 6 16:57:23 2026 +0900
+
+    fix(ci): add empty CHANGELOG.md to prevent release workflow warning
+
+[33mcommit 643d0033256ff74cc17fedeae721c45df3a407a3[m[33m ([m[1;33mtag: [m[1;33mv1.1.4[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Tue Jan 6 16:46:33 2026 +0900
+
+    1.1.4
+
+[33mcommit 4860c61e615f5d20605fe51573ca209f76fae2ba[m
+Author: Declan <syas0301@gmail.com>
+Date:   Tue Jan 6 16:45:38 2026 +0900
+
+    fix: package.json 수정 pnpm 버전을 명시화, 워크플로우 파일 수정
+
+[33mcommit 3887de5cc86f1807f0c3098ad977a9bcaaeb6b2e[m
+Author: Declan <syas0301@gmail.com>
+Date:   Tue Jan 6 16:26:52 2026 +0900
+
+    fix(ci): reorder pnpm setup before node setup to fix path issue
+
+[33mcommit 7301fd3b1e32cfe4347c1bcc8da1fa4a603e53a8[m[33m ([m[1;33mtag: [m[1;33mv1.1.3[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Tue Jan 6 16:22:04 2026 +0900
+
+    1.1.3
+
+[33mcommit 6c64dfba55dc6edd6b686f3229152000b494cd64[m[33m ([m[1;32mfix/develop[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Tue Jan 6 16:18:35 2026 +0900
+
+    feat(transfer): 핸드쉐이크 및 파일 무결성 검증 구현
+    
+    보안 강화를 위한 사용자 승인 기반 파일 전송 시스템과
+    SHA-256 해시 기반 무결성 검증을 구현했습니다.
+    
+    주요 변경사항:
+    - TransferApprovalManager: 전송 요청 승인/거절 관리
+    - SHA-256 해시 검증: 전송 전후 파일 무결성 확인
+    - 폴더 전송 기능: ZIP 스트리밍 후 자동 압축 해제
+    - TransferApprovalModal: 전송 승인 UI 컴포넌트 추가
+    - parking_lot 의존성 추가: 고성능 동기화 프리미티브
+    
+    보안 개선:
+    - 사용자 명시적 승인 없이 전송 시작 방지
+    - 해시 불일치 시 자동 파일 삭제
+    - 30초 타임아웃 기반 요청 만료
+    
+    의존성:
+    - parking_lot 0.12 추가
+    - pons-core-wasm 패키지 경로 수정
+    - LTO 비활성화로 빌드 시간 최적화
+
+[33mcommit ac89ddce4552d803a3655bd2a220f1da433c75dc[m
+Author: Declan <syas0301@gmail.com>
+Date:   Tue Jan 6 10:08:20 2026 +0900
+
+    fix(remove) : 불필요한 파일 삭제
+
+[33mcommit b8be4687a6eb63b6890dcaaf4cd9ea4a60aff361[m[33m ([m[1;33mtag: [m[1;33mv1.1.2[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Tue Jan 6 09:58:56 2026 +0900
+
+    1.1.2
+
+[33mcommit 199142bffe66e8726a4d89238e42d5fb33e5a141[m
+Author: Declan <syas0301@gmail.com>
+Date:   Tue Jan 6 09:57:11 2026 +0900
+
+    docs: README.md 업데이트 및 프로젝트 현황(82%) 반영
+
+[33mcommit 133eac2031b0564389beea65893b23a2f5370f97[m[33m ([m[1;33mtag: [m[1;33mv1.1.1[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 2 14:46:41 2026 +0900
+
+    chore: release version 1.1.1
+
+[33mcommit 8cf631def89e46fb1e69be2ffafd01463e2b10f7[m[33m ([m[1;32mfix/multi[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 2 11:08:08 2026 +0900
+
+    feat(transfer): 폴더/다중 파일 전송 시 zip 스트리밍 개선
+    
+    - 폴더 전송 시 루트 폴더명을 포함한 경로 구조로 변경하여 수신측에서 동일한 폴더 구조로 복원
+    - Zip 스트리밍 수신 후 자동 압축 해제 기능 추가
+    - Zip 파일명 처리 로직 개선 (.zip 확장자 자동 보장)
+    - 압축 해제 후 zip 파일 자동 삭제 옵션 추가
+    - 이벤트 버블링 방지 로직 간소화 (stopPropagation 사용)
+    
+    변경사항:
+    - src-tauri/src/lib.rs: receive_zip_stream_transfer, extract_zip_file 함수 개선
+    - src/components/ReceiverView.tsx: Zip 수신 후 자동 압축 해제 로직 추가
+    - src/components/SenderView.tsx: 폴더 경로 구조 및 이벤트 처리 개선
+    - src/services/native-transfer.ts: zipRootDir 옵션 및 경로 처리 로직 추가
+
+[33mcommit c6f0928dbc4a2f027767021d11dc7110750d748a[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 2 10:45:59 2026 +0900
+
+    feat(transfer): 고성능 스트리밍 전송 아키텍처 구현
+    
+    ## 핵심 기능
+    
+    ### 1. Zip 스트리밍 전송 (zip_stream.rs)
+    - 다중 파일/폴더 전송을 위한 ZipStreamSender/Receiver 구현
+    - 메모리 오버플로우 방지를 위한 임시 파일 기반 Zip 생성
+    - AtomicBool을 활용한 정상적인 취소 지원
+    - 설정 가능한 간격의 진행률 보고 구현
+    - 압축 레벨 설정 지원 (0-9)
+    
+    ### 2. 정밀 동기화 멀티스트림 전송 (multistream.rs)
+    - 2초 윈도우 기반 슬라이딩 윈도우 속도 계산기 구현
+    - 정확한 속도 측정을 위한 ACK 기반 검증 바이트 추적
+    - 파일 크기에 따른 적응형 블록 크기 계산 (256KB-16MB)
+    - HighPerformanceFileSender를 활용한 Zero-Copy I/O
+    - 최대 32개 동시 QUIC 스트림 지원
+    
+    ### 3. 네이티브 전송 서비스 (native-transfer.ts)
+    - 자동 전송 모드 분기 (단일 파일 vs 다중 파일)
+    - 다중 파일 시나리오를 위한 Zip 스트리밍 전송 구현
+    - UI 업데이트 감소를 위한 진행률 스로틀링 (200ms)
+    - Rust 호환성을 위한 snake_case → camelCase 필드 변환 지원
+    - 포괄적인 에러 처리 및 로깅 추가
+    
+    ### 4. Tauri 명령어 (lib.rs)
+    - 다중 파일 Zip 전송을 위한 send_zip_stream_transfer 명령어 추가
+    - Zip 파일 수신을 위한 receive_zip_stream_transfer 명령어 추가
+    - Zip 압축 해제를 위한 extract_zip_file 명령어 추가
+    - 정상적인 취소를 위한 cancel_transfer 명령어 추가
+    - JobControl을 활용한 active_jobs 관리 추가
+    
+    ## 성능 개선
+    
+    - 메모리 사용량: 파일 크기와 무관한 고정 상한 (64MB)
+    - 속도 정확도: ACK 기반 측정으로 송수신측 차이 제거
+    - 블록 크기: 다양한 파일 크기에 최적화된 적응형 계산
+    - UI 반응성: 진행률 스로틀링으로 렌더링 오버헤드 감소
+    
+    ## 아키텍처 변경사항
+    
+    - 백프레셔를 위한 유한 채널을 활용한 Producer-Consumer 패턴
+    - 디스크 I/O 작업을 위한 블로킹 스레드 격리
+    - 네트워크 작업을 위한 비동기 태스크 스폰
+    - 임시 파일을 통한 센트럴 디렉토리 스트리밍 지원
+    
+    ## 호환성 변경사항
+    
+    - 없음 (기존 단일 파일 전송과 호환)
+    
+    ## 관련 문서
+    
+    - ARCH_PATCH_PLAN_2025.md: 완전한 아키텍처 설계 문서
+    - Patch 1 (True Streaming Zip), Patch 2 (Precision Sync), Patch 3 (Adaptive Transport) 구현
+
+[33mcommit 8aabffc98afa69c9c0b2a6137c3366f08550ccb9[m
+Author: Declan <syas0301@gmail.com>
+Date:   Fri Jan 2 06:40:53 2026 +0900
+
+    refactor: 네이티브 전송 시스템으로 전환 및 WASM 의존성 제거
+    
+    WASM 라이브러리(lib/ponscorewasm)를 완전히 제거하고 네이티브 Rust 기반 전송 시스템으로 전환했습니다.
+    
+    주요 변경사항:
+    - WASM 관련 파일 및 의존성 완전 제거
+    - 네이티브 전송 서비스(native-transfer.ts) 개선
+    - 새로운 zip_stream.rs 모듈 추가로 압축 스트림 처리 기능 구현
+    - Tauri 백엔드(lib.rs)에서 전송 및 시그널링 로직 개선
+    - ReceiverView 및 SenderView 컴포넌트에서 네이티브 API 사용으로 변경
+    - mDNS, QUIC 클라이언트/서버 모듈 업데이트
+    - Cargo.toml 및 package.json 의존성 업데이트
+    
+    이 변경으로 WASM 컴파일 오버헤드를 제거하고 네이티브 성능을 활용하여 전송 효율성을 개선했습니다.
+
+[33mcommit 138a5ab8f1ed8fa3699b7017a5c342d0107ec17c[m
+Author: Declan <syas0301@gmail.com>
+Date:   Wed Dec 31 23:18:17 2025 +0900
+
+    fix : 다중파일전송 에러 문제 수정 (zip패키징이 안되고 단일스트림으로 연속적으로 송신
+
+[33mcommit 9253ddb7322632f9b7eccd5e62098ce1c6c413a7[m
+Author: Declan <syas0301@gmail.com>
+Date:   Wed Dec 31 21:29:30 2025 +0900
+
+    fix(native-transfer): set connection state when quic-peer-connected event received
+    
+    - Fix 'Peer not connected' error during file transfer
+    - Set connected, currentPeerId, lastSenderQuicAddress when quic-peer-connected event is received
+    - This ensures sendStreamBatch has proper connection state before starting transfer
+
+[33mcommit 700e98354f67933dcb4245f092f9e4d99607d05c[m[33m ([m[1;33mtag: [m[1;33mv0.1.0[m[33m)[m
+Author: Declan <syas0301@gmail.com>
+Date:   Wed Dec 17 23:50:32 2025 +0900
+
+    feat : 버전 재설정
+
+[33mcommit 7586b463356005edde2517cde05e8a773472fd8c[m
+Author: Declan <syas0301@gmail.com>
+Date:   Wed Dec 17 23:41:35 2025 +0900
+
+    feat : README.md 수정
+
+[33mcommit 2f05196e3d87b17d8cfdbb068708599b877137ed[m
+Author: Declan <syas0301@gmail.com>
+Date:   Wed Dec 17 23:28:37 2025 +0900
+
+    feat : 첫 커밋 : 웹과 분리해서 별도 저장

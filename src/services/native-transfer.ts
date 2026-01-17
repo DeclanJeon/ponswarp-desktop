@@ -863,9 +863,6 @@ class NativeTransferService {
     return this.connectToPeer(peerId, peerAddress);
   }
 
-    return this.connectToPeer(peerId, peer.address);
-  }
-
   /**
    * 🆕 [OPTIMIZED] Zip Streaming Transfer
    * 파일을 순차적으로 읽어서 WASM Zip64Stream에 넣고, 나오는 청크를 즉시 QUIC으로 전송합니다.
