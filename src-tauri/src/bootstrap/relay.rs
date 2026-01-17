@@ -76,15 +76,15 @@ impl RelayServer {
 
         Ok((server_config, cert_der))
     }
-    
+
     pub fn local_addr(&self) -> anyhow::Result<SocketAddr> {
         Ok(self.endpoint.local_addr()?)
     }
-    
+
     pub fn session_count(&self) -> usize {
         self.sessions.len()
     }
-    
+
     pub fn is_at_capacity(&self) -> bool {
         self.sessions.len() >= self.max_sessions
     }
@@ -110,12 +110,12 @@ impl RelayServer {
                             Ok(connection) => {
                                 let addr = connection.remote_address();
                                 info!("📥 릴레이 연결: {}", addr);
-                                
+
                                 let mut stats_guard = stats.write().await;
                                 stats_guard.relay_connections += 1;
                                 stats_guard.active_relay_sessions += 1;
                                 drop(stats_guard);
-                                
+
                                 Self::handle_connection(connection, sessions, stats).await;
                             }
                             Err(e) => {
@@ -148,13 +148,13 @@ impl RelayServer {
 
                     tauri::async_runtime::spawn(async move {
                         let mut buf = vec![0u8; 65536];
-                        
+
                         // 첫 메시지: 릴레이 요청 (대상 세션 ID)
                         match recv.read(&mut buf).await {
                             Ok(Some(n)) => {
                                 let session_id = String::from_utf8_lossy(&buf[..n]).to_string();
                                 debug!("릴레이 요청: {} -> {}", addr, session_id);
-                                
+
                                 // 세션 처리 로직
                                 // 실제 구현에서는 두 피어를 연결하여 데이터 릴레이
                                 // 현재는 기본 구조만 구현
@@ -168,11 +168,12 @@ impl RelayServer {
                 }
                 Err(quinn::ConnectionError::ApplicationClosed(_)) => {
                     info!("📴 릴레이 연결 종료: {}", addr);
-                    
+
                     // 세션 카운트 감소
                     let mut stats_guard = stats.write().await;
-                    stats_guard.active_relay_sessions = stats_guard.active_relay_sessions.saturating_sub(1);
-                    
+                    stats_guard.active_relay_sessions =
+                        stats_guard.active_relay_sessions.saturating_sub(1);
+
                     break;
                 }
                 Err(e) => {
@@ -187,13 +188,16 @@ impl RelayServer {
         let timeout = Duration::from_secs(300);
         let before_count = self.sessions.len();
 
-        self.sessions.retain(|_, session| {
-            session.created_at.elapsed() < timeout
-        });
+        self.sessions
+            .retain(|_, session| session.created_at.elapsed() < timeout);
 
         let removed = before_count - self.sessions.len();
         if removed > 0 {
-            debug!("🧹 릴레이 세션 정리: {} 제거, {} 활성", removed, self.sessions.len());
+            debug!(
+                "🧹 릴레이 세션 정리: {} 제거, {} 활성",
+                removed,
+                self.sessions.len()
+            );
         }
     }
 }

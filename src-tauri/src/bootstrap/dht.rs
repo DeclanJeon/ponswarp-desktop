@@ -22,19 +22,39 @@ pub type InfoHash = [u8; 32];
 /// DHT 메시지
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DhtMessage {
-    Ping { sender_id: NodeId },
-    Pong { sender_id: NodeId },
-    FindNode { sender_id: NodeId, target: NodeId },
-    FindNodeResponse { sender_id: NodeId, nodes: Vec<(NodeId, SocketAddr)> },
-    GetProviders { sender_id: NodeId, info_hash: InfoHash },
+    Ping {
+        sender_id: NodeId,
+    },
+    Pong {
+        sender_id: NodeId,
+    },
+    FindNode {
+        sender_id: NodeId,
+        target: NodeId,
+    },
+    FindNodeResponse {
+        sender_id: NodeId,
+        nodes: Vec<(NodeId, SocketAddr)>,
+    },
+    GetProviders {
+        sender_id: NodeId,
+        info_hash: InfoHash,
+    },
     GetProvidersResponse {
         sender_id: NodeId,
         info_hash: InfoHash,
         providers: Vec<(NodeId, SocketAddr)>,
         nodes: Vec<(NodeId, SocketAddr)>,
     },
-    Announce { sender_id: NodeId, info_hash: InfoHash, port: u16 },
-    AnnounceResponse { sender_id: NodeId, success: bool },
+    Announce {
+        sender_id: NodeId,
+        info_hash: InfoHash,
+        port: u16,
+    },
+    AnnounceResponse {
+        sender_id: NodeId,
+        success: bool,
+    },
 }
 
 impl DhtMessage {
@@ -96,10 +116,12 @@ pub struct DhtHandle {
 
 impl DhtHandle {
     pub async fn add_bootstrap_node(&self, addr: SocketAddr) -> anyhow::Result<()> {
-        self.command_tx.send(DhtCommand::AddBootstrapNode(addr)).await?;
+        self.command_tx
+            .send(DhtCommand::AddBootstrapNode(addr))
+            .await?;
         Ok(())
     }
-    
+
     pub async fn shutdown(&self) -> anyhow::Result<()> {
         self.command_tx.send(DhtCommand::Shutdown).await?;
         Ok(())
@@ -117,10 +139,15 @@ impl DhtNode {
 
         let socket = UdpSocket::bind(format!("0.0.0.0:{}", port)).await?;
         let local_addr = socket.local_addr()?;
-        info!("🌐 DHT 노드 시작: {} (ID: {})", local_addr, hex::encode(&node_id[..8]));
+        info!(
+            "🌐 DHT 노드 시작: {} (ID: {})",
+            local_addr,
+            hex::encode(&node_id[..8])
+        );
 
-        let routing_table: Vec<RwLock<Vec<RoutingEntry>>> =
-            (0..256).map(|_| RwLock::new(Vec::with_capacity(20))).collect();
+        let routing_table: Vec<RwLock<Vec<RoutingEntry>>> = (0..256)
+            .map(|_| RwLock::new(Vec::with_capacity(20)))
+            .collect();
 
         let (command_tx, command_rx) = mpsc::channel(100);
 
@@ -142,12 +169,12 @@ impl DhtNode {
     /// mDNS 서비스 등록 (부트스트랩 노드 자동 발견)
     fn register_mdns_service(port: u16, node_id: &[u8; 32]) {
         let node_id_short = hex::encode(&node_id[..1]);
-        
+
         match ServiceDaemon::new() {
             Ok(daemon) => {
                 let host_name = "ponswarp.local.";
                 let instance_name = format!("pswp-{}", node_id_short);
-                
+
                 match ServiceInfo::new(
                     BOOTSTRAP_SERVICE_TYPE,
                     &instance_name,
@@ -160,7 +187,10 @@ impl DhtNode {
                         if let Err(e) = daemon.register(service) {
                             warn!("mDNS 등록 실패: {}", e);
                         } else {
-                            info!("📡 mDNS 부트스트랩 광고 시작: {} @ port {}", instance_name, port);
+                            info!(
+                                "📡 mDNS 부트스트랩 광고 시작: {} @ port {}",
+                                instance_name, port
+                            );
                         }
                     }
                     Err(e) => warn!("mDNS 서비스 정보 생성 실패: {}", e),
@@ -175,7 +205,7 @@ impl DhtNode {
             command_tx: self.command_tx.clone(),
         }
     }
-    
+
     pub fn local_addr(&self) -> anyhow::Result<SocketAddr> {
         Ok(self.socket.local_addr()?)
     }
@@ -235,7 +265,9 @@ impl DhtNode {
         match msg {
             DhtMessage::Ping { sender_id } => {
                 self.add_node(sender_id, from).await;
-                let response = DhtMessage::Pong { sender_id: self.node_id };
+                let response = DhtMessage::Pong {
+                    sender_id: self.node_id,
+                };
                 self.send_message(&response, from).await;
             }
 
@@ -260,7 +292,10 @@ impl DhtNode {
                 }
             }
 
-            DhtMessage::GetProviders { sender_id, info_hash } => {
+            DhtMessage::GetProviders {
+                sender_id,
+                info_hash,
+            } => {
                 self.add_node(sender_id, from).await;
 
                 let providers = self.get_providers(&info_hash);
@@ -275,14 +310,20 @@ impl DhtNode {
                 self.send_message(&response, from).await;
             }
 
-            DhtMessage::GetProvidersResponse { sender_id, nodes, .. } => {
+            DhtMessage::GetProvidersResponse {
+                sender_id, nodes, ..
+            } => {
                 self.add_node(sender_id, from).await;
                 for (node_id, addr) in nodes {
                     self.add_node(node_id, addr).await;
                 }
             }
 
-            DhtMessage::Announce { sender_id, info_hash, port } => {
+            DhtMessage::Announce {
+                sender_id,
+                info_hash,
+                port,
+            } => {
                 self.add_node(sender_id, from).await;
 
                 let provider_addr = SocketAddr::new(from.ip(), port);
@@ -292,7 +333,11 @@ impl DhtNode {
                 stats.providers_stored += 1;
                 drop(stats);
 
-                info!("📢 Announce: {} provides {}", hex::encode(&sender_id[..8]), hex::encode(&info_hash[..8]));
+                info!(
+                    "📢 Announce: {} provides {}",
+                    hex::encode(&sender_id[..8]),
+                    hex::encode(&info_hash[..8])
+                );
 
                 let response = DhtMessage::AnnounceResponse {
                     sender_id: self.node_id,
@@ -329,7 +374,7 @@ impl DhtNode {
             let mut stats = self.stats.write().await;
             stats.nodes_in_routing_table += 1;
             drop(stats);
-            
+
             // 🆕 피어 발견 이벤트 발생
             if let Some(ref tx) = self.peer_discovered_tx {
                 let event = PeerDiscoveredEvent {
@@ -371,7 +416,11 @@ impl DhtNode {
         }
 
         all_nodes.sort_by(|a, b| a.2.cmp(&b.2));
-        all_nodes.into_iter().take(count).map(|(id, addr, _)| (id, addr)).collect()
+        all_nodes
+            .into_iter()
+            .take(count)
+            .map(|(id, addr, _)| (id, addr))
+            .collect()
     }
 
     fn add_provider(&self, info_hash: InfoHash, node_id: NodeId, addr: SocketAddr) {
@@ -423,10 +472,12 @@ impl DhtNode {
             bucket.retain(|e| e.last_seen.elapsed() < Duration::from_secs(900));
             removed_count += before - bucket.len();
         }
-        
+
         if removed_count > 0 {
             let mut stats = self.stats.write().await;
-            stats.nodes_in_routing_table = stats.nodes_in_routing_table.saturating_sub(removed_count as u64);
+            stats.nodes_in_routing_table = stats
+                .nodes_in_routing_table
+                .saturating_sub(removed_count as u64);
         }
 
         // 오래된 제공자 제거

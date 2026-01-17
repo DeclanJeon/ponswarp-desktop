@@ -28,14 +28,14 @@ impl Bitfield {
     pub fn full(length: usize) -> Self {
         let byte_len = (length + 7) / 8;
         let mut bytes = vec![0xFFu8; byte_len];
-        
+
         // 마지막 바이트의 남는 비트는 0으로 설정
         let remainder = length % 8;
         if remainder > 0 && !bytes.is_empty() {
             let last_idx = bytes.len() - 1;
             bytes[last_idx] = 0xFF << (8 - remainder);
         }
-        
+
         Self { bytes, length }
     }
 
@@ -199,7 +199,7 @@ mod tests {
         bf.set(0, true);
         bf.set(7, true);
         bf.set(15, true);
-        
+
         assert!(bf.has(0));
         assert!(bf.has(7));
         assert!(bf.has(15));
@@ -212,7 +212,7 @@ mod tests {
         let bf = Bitfield::full(10);
         assert_eq!(bf.count_ones(), 10);
         assert!(bf.is_complete());
-        
+
         for i in 0..10 {
             assert!(bf.has(i));
         }
@@ -223,7 +223,7 @@ mod tests {
     fn test_progress() {
         let mut bf = Bitfield::new(100);
         assert_eq!(bf.progress(), 0.0);
-        
+
         for i in 0..50 {
             bf.mark(i);
         }
@@ -235,10 +235,10 @@ mod tests {
         let mut bf = Bitfield::new(16);
         bf.mark(0);
         bf.mark(8);
-        
+
         let bytes = bf.as_bytes().to_vec();
         let restored = Bitfield::from_bytes(bytes, 16);
-        
+
         assert!(restored.has(0));
         assert!(restored.has(8));
         assert!(!restored.has(1));
@@ -248,13 +248,13 @@ mod tests {
     fn test_difference() {
         let mut bf1 = Bitfield::new(8);
         let mut bf2 = Bitfield::new(8);
-        
+
         bf1.mark(0);
         bf1.mark(1);
         bf2.mark(1);
         bf2.mark(2);
         bf2.mark(3);
-        
+
         let diff = bf1.difference(&bf2);
         assert_eq!(diff, vec![2, 3]); // bf2가 가지고 bf1이 없는 것
     }

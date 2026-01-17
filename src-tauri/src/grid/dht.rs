@@ -91,11 +91,7 @@ impl KBucket {
         }
 
         // 가장 오래된 노드 교체 (LRU)
-        if let Some(oldest) = self
-            .entries
-            .iter_mut()
-            .min_by_key(|e| e.last_seen)
-        {
+        if let Some(oldest) = self.entries.iter_mut().min_by_key(|e| e.last_seen) {
             if oldest.last_seen.elapsed() > Duration::from_secs(300) {
                 *oldest = entry;
                 return true;
@@ -211,7 +207,8 @@ impl DhtService {
 
         // UDP 소켓 바인딩
         let socket = UdpSocket::bind(format!("0.0.0.0:{}", port)).await?;
-        info!("🌐 DHT 서비스 시작: {} (NodeID: {})", 
+        info!(
+            "🌐 DHT 서비스 시작: {} (NodeID: {})",
             socket.local_addr()?,
             hex::encode(&node_id[..8])
         );
@@ -435,10 +432,7 @@ impl DhtService {
                 let mut providers = Vec::new();
                 if self.providing.contains(&info_hash) {
                     let port = self.socket.local_addr().map(|a| a.port()).unwrap_or(0);
-                    providers.push((
-                        self.node_id,
-                        SocketAddr::new(from.ip(), port),
-                    ));
+                    providers.push((self.node_id, SocketAddr::new(from.ip(), port)));
                 }
 
                 // 캐시된 제공자 추가
@@ -513,8 +507,11 @@ impl DhtService {
 
                 // 제공자 캐시에 추가
                 let provider_addr = SocketAddr::new(from.ip(), port);
-                let entry = self.providers_cache.entry(info_hash).or_insert_with(Vec::new);
-                
+                let entry = self
+                    .providers_cache
+                    .entry(info_hash)
+                    .or_insert_with(Vec::new);
+
                 // 중복 제거
                 entry.retain(|(id, _, _)| *id != sender_id);
                 entry.push((sender_id, provider_addr, Instant::now()));

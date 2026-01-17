@@ -1,9 +1,9 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
-use serde::{Serialize, Deserialize};
 use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +51,7 @@ impl PeerNode {
         let bandwidth_score = self.capabilities.available_bandwidth_mbps as i64;
         let latency_penalty = self.latency_ms as i64;
         let load_penalty = self.active_streams as i64 * 100;
-        
+
         bandwidth_score - latency_penalty - load_penalty
     }
 
@@ -88,7 +88,7 @@ impl NodeRegistry {
         if local_id.as_ref() == Some(&node.id) {
             return;
         }
-        
+
         let mut nodes = self.nodes.write().await;
         info!("📡 노드 추가: {} @ {}", node.id, node.address);
         nodes.insert(node.id.clone(), node);
@@ -120,12 +120,13 @@ impl NodeRegistry {
 
     pub async fn get_relay_candidates(&self) -> Vec<PeerNode> {
         let nodes = self.nodes.read().await;
-        let mut candidates: Vec<_> = nodes.values()
+        let mut candidates: Vec<_> = nodes
+            .values()
             .filter(|n| n.capabilities.can_relay && n.capabilities.available_bandwidth_mbps > 1000)
             .filter(|n| !n.is_stale(30))
             .cloned()
             .collect();
-        
+
         candidates.sort_by(|a, b| b.score().cmp(&a.score()));
         candidates
     }
@@ -138,11 +139,12 @@ impl NodeRegistry {
 
     pub async fn cleanup_stale_nodes(&self, timeout_secs: u64) {
         let mut nodes = self.nodes.write().await;
-        let stale_ids: Vec<_> = nodes.iter()
+        let stale_ids: Vec<_> = nodes
+            .iter()
             .filter(|(_, n)| n.is_stale(timeout_secs))
             .map(|(id, _)| id.clone())
             .collect();
-        
+
         for id in stale_ids {
             info!("🗑️ 오래된 노드 정리: {}", id);
             nodes.remove(&id);

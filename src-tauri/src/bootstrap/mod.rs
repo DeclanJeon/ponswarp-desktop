@@ -5,9 +5,9 @@
 pub mod config;
 pub mod dht;
 pub mod relay;
-pub mod stats;
 pub mod service;
+pub mod stats;
 
 pub use config::BootstrapConfig;
-pub use service::{EmbeddedBootstrapService, ServiceState, BoundPorts, BootstrapStatus};
-pub use stats::{StatsCollector, StatsServer, DhtStats, RelayStats};
+pub use service::{BootstrapStatus, BoundPorts, EmbeddedBootstrapService, ServiceState};
+pub use stats::{DhtStats, RelayStats, StatsCollector, StatsServer};

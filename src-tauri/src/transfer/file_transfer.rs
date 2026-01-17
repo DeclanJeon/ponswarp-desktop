@@ -2,6 +2,11 @@
 //!
 //! WebRTC를 대체하여 Native 환경에서 파일 전송을 담당합니다.
 
+use crate::protocol::commands::{TransferRequest, TransferResponse};
+use anyhow::Result;
+use hex;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File as StdFile};
 use std::io::{Seek, SeekFrom, Write};
@@ -11,12 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::{mpsc, RwLock};
-use anyhow::Result;
 use tracing::{info, warn};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use hex;
-use crate::protocol::commands::{TransferRequest, TransferResponse};
 
 /// 전송 상태
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -103,7 +103,10 @@ impl TransferApprovalManager {
         let job_id = request.job_id.clone();
         let (tx, rx) = mpsc::channel(1);
 
-        self.pending_requests.write().await.insert(job_id.clone(), request);
+        self.pending_requests
+            .write()
+            .await
+            .insert(job_id.clone(), request);
         self.approval_tx.write().await.insert(job_id.clone(), tx);
 
         (job_id, rx)
@@ -146,7 +149,7 @@ impl TransferApprovalManager {
     }
 }
 
-    /// 파일 전송 엔진
+/// 파일 전송 엔진
 pub struct FileTransferEngine {
     state: Arc<RwLock<TransferState>>,
     progress_tx: Option<mpsc::Sender<TransferProgress>>,
@@ -179,7 +182,13 @@ impl FileTransferEngine {
     }
 
     /// 진행률 보고
-    async fn report_progress(&self, job_id: &str, bytes_transferred: u64, total_bytes: u64, speed_bps: u64) {
+    async fn report_progress(
+        &self,
+        job_id: &str,
+        bytes_transferred: u64,
+        total_bytes: u64,
+        speed_bps: u64,
+    ) {
         let progress = TransferProgress {
             job_id: job_id.to_string(),
             bytes_transferred,
@@ -212,7 +221,8 @@ impl FileTransferEngine {
         let file = File::open(&file_path).await?;
         let metadata = file.metadata().await?;
         let total_size = metadata.len();
-        let file_name = file_path.file_name()
+        let file_name = file_path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
@@ -254,7 +264,7 @@ impl FileTransferEngine {
         };
 
         let (mut send, mut recv) = conn.open_bi().await?;
-        
+
         // 매니페스트 전송
         let manifest_json = serde_json::to_vec(&manifest)?;
         let manifest_len = manifest_json.len() as u32;
@@ -287,12 +297,12 @@ impl FileTransferEngine {
                 }
                 Ok(n) => {
                     info!("📤 {} bytes 읽음, 전송 중...", n);
-                    
+
                     if let Err(e) = send.write_all(&buffer[..n]).await {
                         warn!("📤 데이터 전송 실패: {}", e);
                         return Err(anyhow::anyhow!("데이터 전송 실패: {}", e));
                     }
-                    
+
                     bytes_sent += n as u64;
 
                     // 진행률 보고 (200ms마다 - UI 스로틀링과 동기화)
@@ -305,7 +315,8 @@ impl FileTransferEngine {
                         } else {
                             0
                         };
-                        self.report_progress(job_id, bytes_sent, total_size, speed).await;
+                        self.report_progress(job_id, bytes_sent, total_size, speed)
+                            .await;
                     }
                 }
                 Err(e) => {
@@ -314,7 +325,7 @@ impl FileTransferEngine {
                 }
             }
         }
-        
+
         info!("📤 데이터 전송 루프 완료: {} bytes 전송됨", bytes_sent);
 
         // 🚨 [핵심 수정] 스트림 종료 - 빠른 완료 처리
@@ -327,7 +338,12 @@ impl FileTransferEngine {
         // 2. Receiver의 DONE 응답 대기 (최대 500ms - 빠른 UI 응답을 위해)
         // DONE을 못 받아도 데이터는 이미 전송 완료됨
         let mut done_buf = [0u8; 4];
-        match tokio::time::timeout(std::time::Duration::from_millis(500), recv.read_exact(&mut done_buf)).await {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            recv.read_exact(&mut done_buf),
+        )
+        .await
+        {
             Ok(Ok(_)) if &done_buf == b"DONE" => {
                 info!("✅ Receiver 완료 확인 수신: DONE");
             }
@@ -338,7 +354,8 @@ impl FileTransferEngine {
         }
 
         self.update_state(TransferState::Completed).await;
-        self.report_progress(job_id, total_size, total_size, 0).await;
+        self.report_progress(job_id, total_size, total_size, 0)
+            .await;
 
         info!("✅ 파일 전송 완료: {} bytes", bytes_sent);
         Ok(bytes_sent)
@@ -357,10 +374,10 @@ impl FileTransferEngine {
         *self.current_job_id.write().await = Some(job_id.to_string());
 
         info!("📥 파일 수신 대기 중... (accept_bi)");
-        
+
         // 스트림 수락 (Sender가 open_bi()로 연 스트림을 받음)
         let (mut send, mut recv) = conn.accept_bi().await?;
-        
+
         info!("📥 스트림 수락됨, 매니페스트 수신 중...");
 
         // 매니페스트 수신
@@ -417,7 +434,8 @@ impl FileTransferEngine {
                         } else {
                             0
                         };
-                        self.report_progress(job_id, bytes_received, total_size, speed).await;
+                        self.report_progress(job_id, bytes_received, total_size, speed)
+                            .await;
                     }
                 }
                 _ => break,
@@ -430,7 +448,10 @@ impl FileTransferEngine {
         if let Some(ref expected) = expected_checksum {
             if calculated_checksum != *expected {
                 // 해시 불일치 - 파일 삭제 후 에러 반환
-                warn!("🔐 해시 불일치! 예상: {}, 계산: {}", expected, calculated_checksum);
+                warn!(
+                    "🔐 해시 불일치! 예상: {}, 계산: {}",
+                    expected, calculated_checksum
+                );
                 tokio::fs::remove_file(&save_path).await?;
                 return Err(anyhow::anyhow!(
                     "파일 무결성 검증 실패: 해시 불일치\n예상: {}\n계산: {}",
@@ -451,12 +472,13 @@ impl FileTransferEngine {
         if let Err(e) = send.write_all(b"DONE").await {
             warn!("DONE 응답 전송 실패 (무시 가능): {}", e);
         }
-        
+
         // 스트림 종료 (에러 무시 - Sender가 이미 닫았을 수 있음)
         let _ = send.finish();
 
         self.update_state(TransferState::Completed).await;
-        self.report_progress(job_id, total_size, total_size, 0).await;
+        self.report_progress(job_id, total_size, total_size, 0)
+            .await;
 
         info!("✅ 파일 수신 완료: {} -> {:?}", bytes_received, save_path);
         Ok(save_path)
@@ -464,7 +486,8 @@ impl FileTransferEngine {
 
     /// 전송 취소
     pub async fn cancel(&self) {
-        self.update_state(TransferState::Failed("Cancelled by user".to_string())).await;
+        self.update_state(TransferState::Failed("Cancelled by user".to_string()))
+            .await;
     }
 }
 
@@ -484,12 +507,12 @@ pub fn resolve_path(base: String, relative: String) -> String {
 #[tauri::command]
 pub fn scan_folder(path: String) -> Result<Vec<serde_json::Value>, String> {
     let mut files = Vec::new();
-    
+
     fn scan_recursive(dir: &Path, base_path: &Path, files: &mut Vec<serde_json::Value>) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let entry_path = entry.path();
-                
+
                 if entry_path.is_dir() {
                     // 하위 폴더 재귀 스캔 (숨겨진 폴더 제외)
                     let folder_name = entry.file_name();
@@ -502,25 +525,23 @@ pub fn scan_folder(path: String) -> Result<Vec<serde_json::Value>, String> {
                         Ok(m) => m,
                         Err(_) => continue,
                     };
-                    
-                    let file_name = entry.file_name()
-                        .to_string_lossy()
-                        .to_string();
-                    
+
+                    let file_name = entry.file_name().to_string_lossy().to_string();
+
                     // 숨겨진 파일 제외 (.DS_Store, .git 등)
                     if file_name.starts_with('.') {
                         continue;
                     }
-                    
+
                     // 상대 경로 계산 (예: "src/utils/logger.ts")
                     let relative_path = entry_path
                         .strip_prefix(base_path)
                         .map(|p| p.to_string_lossy().to_string())
                         .unwrap_or_else(|_| file_name.clone());
-                    
+
                     // OS 경로 구분자를 /로 정규화
                     let relative_path = relative_path.replace('\\', "/");
-                    
+
                     files.push(serde_json::json!({
                         "name": file_name,
                         "path": relative_path,
@@ -531,14 +552,17 @@ pub fn scan_folder(path: String) -> Result<Vec<serde_json::Value>, String> {
             }
         }
     }
-    
+
     let base_path = Path::new(&path);
     scan_recursive(base_path, base_path, &mut files);
-    
-    println!("[Rust] 📁 Scanned {} files from folder: {}", files.len(), path);
+
+    println!(
+        "[Rust] 📁 Scanned {} files from folder: {}",
+        files.len(),
+        path
+    );
     Ok(files)
 }
-
 
 /// [Filesystem] 해당 파일 경로의 상위 디렉토리가 존재하는지 확인하고, 없으면 생성 (mkdir -p)
 #[tauri::command]
@@ -573,14 +597,21 @@ pub fn start_native_file_stream(
     // 2. 공간 미리 할당 (Pre-allocation for performance)
     if total_size > 0 {
         if let Err(e) = file.set_len(total_size) {
-            println!("[Rust] Warning: Failed to pre-allocate file ({} bytes): {}", total_size, e);
+            println!(
+                "[Rust] Warning: Failed to pre-allocate file ({} bytes): {}",
+                total_size, e
+            );
             // Pre-allocation 실패는 치명적이지 않으므로 경고만 출력하고 진행
         }
     }
 
     // 3. 상태 저장
-    state.file_streams.lock().unwrap().insert(file_id.clone(), file);
-    
+    state
+        .file_streams
+        .lock()
+        .unwrap()
+        .insert(file_id.clone(), file);
+
     println!("[Rust] File stream started: {}", save_path);
     Ok(())
 }
@@ -594,7 +625,7 @@ pub fn write_native_file_chunk(
     offset: i64,
 ) -> Result<(), String> {
     let mut streams = state.file_streams.lock().unwrap();
-    
+
     if let Some(file) = streams.get_mut(&file_id) {
         // Offset이 -1이면 현재 위치(Append), 아니면 Seek
         if offset >= 0 {
@@ -609,7 +640,7 @@ pub fn write_native_file_chunk(
 
         file.write_all(&chunk)
             .map_err(|e| format!("Write failed: {}", e))?;
-            
+
         Ok(())
     } else {
         Err(format!("File stream not found: {}", file_id))
@@ -623,7 +654,7 @@ pub fn close_native_file_stream(
     file_id: String,
 ) -> Result<(), String> {
     let mut streams = state.file_streams.lock().unwrap();
-    
+
     if let Some(file) = streams.remove(&file_id) {
         // File은 Scope를 벗어나면 자동으로 close되지만, 확실하게 sync() 호출
         file.sync_all().map_err(|e| format!("Sync failed: {}", e))?;
@@ -634,7 +665,6 @@ pub fn close_native_file_stream(
         Ok(())
     }
 }
-
 
 impl Default for FileTransferEngine {
     fn default() -> Self {

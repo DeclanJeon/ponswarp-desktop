@@ -11,8 +11,8 @@
 //! - `dht`: Kademlia DHT (Trackerless Discovery)
 
 pub mod bitfield;
-pub mod piece_manager;
 pub mod bootstrap_discovery;
+pub mod piece_manager;
 
 // NOTE: Grid 내부 구현 타입들은 현재 외부로 re-export 하지 않습니다.
 // (사용 시 `grid::bitfield::Bitfield` 처럼 모듈 경로로 접근)
@@ -20,28 +20,28 @@ pub mod bootstrap_discovery;
 // Phase 2 (WIP) - 아직 앱의 기본 플로우에서 사용하지 않으므로, 기본 빌드 경고/크기/컴파일 시간을 줄이기 위해 feature로 분리
 // 필요 시 `--features grid-experimental` 로 활성화
 #[cfg(feature = "grid-experimental")]
+pub mod dht;
+#[cfg(feature = "grid-experimental")]
+pub mod hybrid_discovery;
+#[cfg(feature = "grid-experimental")]
+pub mod peer;
+#[cfg(feature = "grid-experimental")]
 pub mod protocol;
 #[cfg(feature = "grid-experimental")]
 pub mod scheduler;
 #[cfg(feature = "grid-experimental")]
 pub mod swarm;
-#[cfg(feature = "grid-experimental")]
-pub mod dht;
-#[cfg(feature = "grid-experimental")]
-pub mod peer;
-#[cfg(feature = "grid-experimental")]
-pub mod hybrid_discovery;
 
+#[cfg(feature = "grid-experimental")]
+pub use dht::{DhtCommand, DhtEvent, DhtService};
+#[cfg(feature = "grid-experimental")]
+pub use peer::{Peer, PeerCommand, PeerEvent};
 #[cfg(feature = "grid-experimental")]
 pub use protocol::GridMessage;
 #[cfg(feature = "grid-experimental")]
 pub use scheduler::Scheduler;
 #[cfg(feature = "grid-experimental")]
 pub use swarm::{GridSwarm, SwarmCommand, SwarmEvent};
-#[cfg(feature = "grid-experimental")]
-pub use dht::{DhtService, DhtCommand, DhtEvent};
-#[cfg(feature = "grid-experimental")]
-pub use peer::{Peer, PeerCommand, PeerEvent};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -92,19 +92,19 @@ pub fn emit_peer_discovered(app: &AppHandle, event: GridPeerDiscovered) {
 pub mod config {
     /// 기본 조각 크기 (1MB - Grid 모드에서는 작은 조각이 유리)
     pub const DEFAULT_PIECE_SIZE: u32 = 1024 * 1024;
-    
+
     /// 최대 동시 연결 수
     pub const MAX_PEERS: usize = 50;
-    
+
     /// 최대 동시 요청 수 (피어당)
     pub const MAX_PENDING_REQUESTS: usize = 16;
-    
+
     /// Keep-Alive 간격 (초)
     pub const KEEPALIVE_INTERVAL_SECS: u64 = 30;
-    
+
     /// 연결 타임아웃 (초)
     pub const CONNECTION_TIMEOUT_SECS: u64 = 30;
-    
+
     /// DHT 부트스트랩 노드 (사내망 고정 노드)
     pub const DHT_BOOTSTRAP_NODES: &[&str] = &[];
 }

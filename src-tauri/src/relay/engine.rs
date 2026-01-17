@@ -1,9 +1,9 @@
+use anyhow::Result;
 use bytes::BytesMut;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock, Mutex};
-use tracing::{info, debug};
-use anyhow::Result;
+use tokio::sync::{mpsc, Mutex, RwLock};
+use tracing::{debug, info};
 
 const DEFAULT_BUFFER_SIZE: usize = 64 * 1024;
 const DEFAULT_POOL_SIZE: usize = 1000;
@@ -20,13 +20,14 @@ impl BufferPool {
         let buffers: Vec<_> = (0..pool_size)
             .map(|_| BytesMut::with_capacity(buffer_size))
             .collect();
-        
-        info!("🔧 버퍼 풀 생성: {} 버퍼 x {} KB = {} MB",
-            pool_size, 
+
+        info!(
+            "🔧 버퍼 풀 생성: {} 버퍼 x {} KB = {} MB",
+            pool_size,
             buffer_size / 1024,
             (pool_size * buffer_size) / (1024 * 1024)
         );
-        
+
         Self {
             buffers: Mutex::new(buffers),
             buffer_size,
@@ -37,14 +38,14 @@ impl BufferPool {
 
     pub async fn acquire(&self) -> Option<BytesMut> {
         let mut pool = self.buffers.lock().await;
-        
+
         if let Some(mut buf) = pool.pop() {
             buf.clear();
             let mut allocated = self.allocated.write().await;
             *allocated += 1;
             return Some(buf);
         }
-        
+
         let allocated = *self.allocated.read().await;
         if allocated < self.max_buffers {
             let mut alloc = self.allocated.write().await;
@@ -52,17 +53,17 @@ impl BufferPool {
             debug!("버퍼 풀 확장: {}/{}", *alloc, self.max_buffers);
             return Some(BytesMut::with_capacity(self.buffer_size));
         }
-        
+
         None
     }
 
     pub async fn release(&self, buf: BytesMut) {
         let mut pool = self.buffers.lock().await;
-        
+
         if pool.len() < self.max_buffers {
             pool.push(buf);
         }
-        
+
         let mut allocated = self.allocated.write().await;
         if *allocated > 0 {
             *allocated -= 1;
@@ -110,7 +111,10 @@ impl RelaySession {
 pub struct RelayEngine {
     buffer_pool: Arc<BufferPool>,
     sessions: Arc<RwLock<HashMap<String, Arc<RelaySession>>>>,
-    data_channel: (mpsc::Sender<RelayData>, Arc<Mutex<mpsc::Receiver<RelayData>>>),
+    data_channel: (
+        mpsc::Sender<RelayData>,
+        Arc<Mutex<mpsc::Receiver<RelayData>>>,
+    ),
     running: Arc<RwLock<bool>>,
 }
 
@@ -124,7 +128,7 @@ pub struct RelayData {
 impl RelayEngine {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(10000);
-        
+
         Self {
             buffer_pool: Arc::new(BufferPool::new(DEFAULT_POOL_SIZE, DEFAULT_BUFFER_SIZE)),
             sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -150,21 +154,21 @@ impl RelayEngine {
 
         tauri::async_runtime::spawn(async move {
             let mut receiver = rx.lock().await;
-            
+
             while *running.read().await {
                 tokio::select! {
                     Some(data) = receiver.recv() => {
                         let sessions = sessions.read().await;
                         if let Some(session) = sessions.get(&data.job_id) {
                             let data_len = data.data.len() as u64;
-                            
+
                             for target in &session.targets {
                                 debug!("릴레이: {} bytes -> {}", data_len, target.address);
                             }
-                            
+
                             session.add_relayed_bytes(data_len).await;
                         }
-                        
+
                         buffer_pool.release(data.data).await;
                     }
                     _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
@@ -172,7 +176,7 @@ impl RelayEngine {
                     }
                 }
             }
-            
+
             info!("릴레이 엔진 워커 종료");
         });
 
@@ -192,47 +196,50 @@ impl RelayEngine {
         targets: Vec<RelayTarget>,
     ) -> Result<()> {
         let session = Arc::new(RelaySession::new(job_id.clone(), source, targets));
-        
+
         let mut sessions = self.sessions.write().await;
         sessions.insert(job_id.clone(), session);
-        
+
         info!("📋 릴레이 세션 생성: {}", job_id);
         Ok(())
     }
 
     pub async fn relay_data(&self, job_id: &str, data: BytesMut) -> Result<()> {
         let source = std::net::SocketAddr::from(([0, 0, 0, 0], 0));
-        
-        self.data_channel.0.send(RelayData {
-            job_id: job_id.to_string(),
-            data,
-            source,
-        }).await?;
-        
+
+        self.data_channel
+            .0
+            .send(RelayData {
+                job_id: job_id.to_string(),
+                data,
+                source,
+            })
+            .await?;
+
         Ok(())
     }
 
     pub async fn end_session(&self, job_id: &str) -> Option<u64> {
         let mut sessions = self.sessions.write().await;
-        
+
         if let Some(session) = sessions.remove(job_id) {
             let bytes = *session.bytes_relayed.read().await;
             info!("📋 릴레이 세션 종료: {}, {} bytes 전송됨", job_id, bytes);
             return Some(bytes);
         }
-        
+
         None
     }
 
     pub async fn get_session_stats(&self, job_id: &str) -> Option<(u64, std::time::Duration)> {
         let sessions = self.sessions.read().await;
-        
+
         if let Some(session) = sessions.get(job_id) {
             let bytes = *session.bytes_relayed.read().await;
             let elapsed = session.created_at.elapsed();
             return Some((bytes, elapsed));
         }
-        
+
         None
     }
 
@@ -262,7 +269,7 @@ impl Default for RelayEngine {
 #[cfg(target_os = "linux")]
 pub fn verify_no_disk_write() -> bool {
     use std::fs;
-    
+
     let io_stats = fs::read_to_string("/proc/self/io").unwrap_or_default();
     let write_bytes: u64 = io_stats
         .lines()

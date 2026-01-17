@@ -23,12 +23,12 @@ pub struct PieceInfo {
 /// 파일 메타데이터 (토렌트의 .torrent 파일과 유사)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileMetadata {
-    pub info_hash: [u8; 32],      // 전체 파일 식별자
+    pub info_hash: [u8; 32], // 전체 파일 식별자
     pub file_name: String,
     pub file_size: u64,
     pub piece_size: u32,
     pub total_pieces: usize,
-    pub piece_hashes: Vec<[u8; 32]>, // 각 조각의 해시
+    pub piece_hashes: Vec<[u8; 32]>,   // 각 조각의 해시
     pub merkle_root: Option<[u8; 32]>, // Merkle Tree 루트 (선택적)
 }
 
@@ -343,10 +343,14 @@ impl PieceManager {
         use tokio::fs::File;
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-        let piece = self.pieces.get(index)
+        let piece = self
+            .pieces
+            .get(index)
             .ok_or_else(|| anyhow::anyhow!("Invalid piece index: {}", index))?;
 
-        let path = self.save_path.as_ref()
+        let path = self
+            .save_path
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Source path not set"))?;
 
         let mut file = File::open(path).await?;
@@ -363,13 +367,17 @@ impl PieceManager {
         use tokio::fs::OpenOptions;
         use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
-        let piece = self.pieces.get(index)
+        let piece = self
+            .pieces
+            .get(index)
             .ok_or_else(|| anyhow::anyhow!("Invalid piece index: {}", index))?;
 
         if data.len() as u32 != piece.length {
             return Err(anyhow::anyhow!(
                 "Piece {} length mismatch: expected {}, got {}",
-                index, piece.length, data.len()
+                index,
+                piece.length,
+                data.len()
             ));
         }
 
@@ -378,7 +386,9 @@ impl PieceManager {
             return Err(anyhow::anyhow!("Piece {} hash verification failed", index));
         }
 
-        let path = self.save_path.as_ref()
+        let path = self
+            .save_path
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Save path not set"))?;
 
         // 파일이 없으면 생성하고 크기 할당
@@ -413,7 +423,7 @@ mod tests {
             info_hash: [0u8; 32],
             file_name: "test.bin".to_string(),
             file_size: 10 * 1024 * 1024, // 10MB
-            piece_size: 1024 * 1024,      // 1MB
+            piece_size: 1024 * 1024,     // 1MB
             total_pieces: 10,
             piece_hashes: vec![[0u8; 32]; 10],
             merkle_root: None,

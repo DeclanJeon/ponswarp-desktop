@@ -36,10 +36,7 @@ pub enum PeerEvent {
         info_hash: [u8; 32],
     },
     /// Bitfield 수신
-    BitfieldReceived {
-        peer_id: String,
-        pieces: Vec<usize>,
-    },
+    BitfieldReceived { peer_id: String, pieces: Vec<usize> },
     /// Have 메시지 수신
     HaveReceived { peer_id: String, piece_index: u32 },
     /// 조각 데이터 수신
@@ -308,9 +305,7 @@ impl Peer {
 
         match msg {
             GridMessage::Handshake {
-                info_hash,
-                peer_id,
-                ..
+                info_hash, peer_id, ..
             } => {
                 // Info Hash 검증
                 let pm = self.piece_manager.read().await;
@@ -330,8 +325,7 @@ impl Peer {
                 // Bitfield 전송
                 let pm = self.piece_manager.read().await;
                 let bf = pm.get_bitfield();
-                let bitfield_msg =
-                    GridMessage::bitfield(bf.as_bytes().to_vec(), bf.len());
+                let bitfield_msg = GridMessage::bitfield(bf.as_bytes().to_vec(), bf.len());
                 drop(pm);
 
                 self.send_message(send_stream, bitfield_msg).await?;

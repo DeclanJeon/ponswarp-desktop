@@ -9,15 +9,15 @@
 //! - 수신 측에서 블록 순서 재조립
 //! - ACK 기반의 신뢰성 있는 속도 측정 (Verified Speed)
 
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::collections::{HashMap, VecDeque};
-use std::time::{Instant, Duration};
-use tokio::sync::{mpsc, RwLock, Semaphore};
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
-use anyhow::Result;
-use tracing::{info, warn, debug};
-use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, RwLock, Semaphore};
+use tracing::{debug, info, warn};
 
 use super::zero_copy_io::{BlockInfo, HighPerformanceFileSender};
 
@@ -59,7 +59,7 @@ impl BlockHeader {
 }
 
 /// Sliding Window 속도 계산기 (Patch 2: Precision Sync)
-/// 
+///
 /// 순간 속도 스파이크를 필터링하고 부드러운 UI 업데이트를 제공합니다.
 /// 2초 윈도우 기반 이동 평균 알고리즘을 사용합니다.
 struct SpeedCalculator {
@@ -116,24 +116,23 @@ impl SpeedCalculator {
     }
 }
 
-
 /// 멀티스트림 전송 진행률
-/// 
+///
 /// Note: 송신측과 수신측의 속도 표시 차이를 줄이기 위해
 /// acknowledged_bytes (수신확인된 바이트)를 도입함.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiStreamProgress {
     pub job_id: String,
-    
+
     pub blocks_completed: u32,
     pub total_blocks: u32,
-    
+
     /// 네트워크로 전송한 바이트 (Wire Bytes)
     pub bytes_transferred: u64,
-    
+
     /// 수신측이 ACK한 바이트 (Verified Bytes) - UI 표시 권장
     pub acknowledged_bytes: u64,
-    
+
     pub total_bytes: u64,
     pub active_streams: u32,
     pub speed_bps: u64,
@@ -185,24 +184,34 @@ impl MultiStreamSender {
         // 여기서 임시 block_size로 열고, 파일 크기 확인 후 재조정은 불가능하므로(open시 mmap하진 않음)
         // 먼저 파일 크기를 확인하는 것이 좋지만, HighPerformanceFileSender가 크기를 줌.
         // open 자체는 비용이 낮으므로 일단 open.
-        let file_sender = Arc::new(HighPerformanceFileSender::open(&file_path, self.block_size)?);
+        let file_sender = Arc::new(HighPerformanceFileSender::open(
+            &file_path,
+            self.block_size,
+        )?);
         let file_size = file_sender.file_size();
-        
+
         // --- Patch 3: Adaptive Block Size ---
         let optimal_block_size = self.calculate_optimal_block_size(file_size);
-        // 블록 사이즈가 변경되었으므로 file_sender의 블록 설정도 영향받을 수 있으나 
+        // 블록 사이즈가 변경되었으므로 file_sender의 블록 설정도 영향받을 수 있으나
         // HighPerformanceFileSender는 read_block_owned에서 offset/size를 받으므로 문제 없음.
-        
+
         // 블록 생성 (Adaptive Size 적용)
         let blocks = file_sender.get_blocks(optimal_block_size);
         let total_blocks = blocks.len() as u32;
 
-        let file_name = file_path.file_name()
+        let file_name = file_path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        info!("📤 멀티스트림 전송 시작: {} ({} bytes)", file_name, file_size);
-        info!("📦 Adaptive Block: {} bytes (Total {} blocks)", optimal_block_size, total_blocks);
+        info!(
+            "📤 멀티스트림 전송 시작: {} ({} bytes)",
+            file_name, file_size
+        );
+        info!(
+            "📦 Adaptive Block: {} bytes (Total {} blocks)",
+            optimal_block_size, total_blocks
+        );
 
         // 매니페스트 전송 (제어 스트림)
         let manifest = MultiStreamManifest {
@@ -218,13 +227,13 @@ impl MultiStreamSender {
 
         // 동시성 제어를 위한 세마포어
         let semaphore = Arc::new(Semaphore::new(self.max_concurrent));
-        
+
         // 진행률 추적
         let completed_blocks = Arc::new(RwLock::new(0u32));
         let bytes_transferred = Arc::new(RwLock::new(0u64));
         // --- Patch 2: Acknowledged Bytes ---
-        let bytes_acknowledged = Arc::new(RwLock::new(0u64)); 
-        
+        let bytes_acknowledged = Arc::new(RwLock::new(0u64));
+
         let start_time = std::time::Instant::now();
         // 블록 전송 태스크들
         let mut handles = Vec::with_capacity(blocks.len());
@@ -251,7 +260,7 @@ impl MultiStreamSender {
 
                 if let Ok(sent_size) = result {
                     // 성공했다는 것은 ACK를 받았다는 것
-                    
+
                     // 완료 블록 수 업데이트
                     let mut comp = completed.write().await;
                     *comp += 1;
@@ -265,7 +274,7 @@ impl MultiStreamSender {
                     *trans += sent_size;
                     let bytes_done = *trans;
                     drop(trans);
-                    
+
                     // --- Patch 2: Ack-based Verification Update ---
                     let mut acked = acknowledged.write().await;
                     *acked += sent_size;
@@ -283,16 +292,18 @@ impl MultiStreamSender {
                         // Sliding Window 기반 속도 계산
                         let speed = speed_calc.read().await.get_speed();
 
-                        let _ = tx.send(MultiStreamProgress {
-                            job_id: job_id.clone(),
-                            blocks_completed: blocks_done,
-                            total_blocks,
-                            bytes_transferred: bytes_done,
-                            acknowledged_bytes: bytes_acked_val, // Patch 2 added
-                            total_bytes,
-                            active_streams: sem.available_permits() as u32, // 남은 permit이 아니라 사용중인 건 (max - available)여야 하는데 로직 수정 필요. 일단 그대로 둠.
-                            speed_bps: speed,
-                        }).await;
+                        let _ = tx
+                            .send(MultiStreamProgress {
+                                job_id: job_id.clone(),
+                                blocks_completed: blocks_done,
+                                total_blocks,
+                                bytes_transferred: bytes_done,
+                                acknowledged_bytes: bytes_acked_val, // Patch 2 added
+                                total_bytes,
+                                active_streams: sem.available_permits() as u32, // 남은 permit이 아니라 사용중인 건 (max - available)여야 하는데 로직 수정 필요. 일단 그대로 둠.
+                                speed_bps: speed,
+                            })
+                            .await;
                     }
                 }
 
@@ -316,23 +327,25 @@ impl MultiStreamSender {
         self.send_completion_signal(job_id).await?;
 
         info!("✅ 멀티스트림 전송 완료: {} bytes", total_sent);
-        
+
         // 속도 계산기 리셋
         {
             let mut calc = self.speed_calculator.write().await;
             calc.reset();
         }
-        
+
         Ok(total_sent)
     }
 
     /// 파일 크기 기반 최적 블록 크기 계산 (Patch 3)
     fn calculate_optimal_block_size(&self, file_size: u64) -> usize {
-        const MIN_BLOCK: u64 = 256 * 1024;       // 256KB
+        const MIN_BLOCK: u64 = 256 * 1024; // 256KB
         const MAX_BLOCK: u64 = 16 * 1024 * 1024; // 16MB
-        const TARGET_PARTS: u64 = 100;           // 적절한 분할 수
-        
-        if file_size == 0 { return MIN_BLOCK as usize; }
+        const TARGET_PARTS: u64 = 100; // 적절한 분할 수
+
+        if file_size == 0 {
+            return MIN_BLOCK as usize;
+        }
 
         let ideal_size = file_size / TARGET_PARTS;
         ideal_size.clamp(MIN_BLOCK, MAX_BLOCK) as usize
@@ -344,7 +357,7 @@ impl MultiStreamSender {
 
         // 매니페스트 타입 마커
         send.write_all(b"MNFT").await?;
-        
+
         let manifest_json = serde_json::to_vec(manifest)?;
         let len = manifest_json.len() as u32;
         send.write_all(&len.to_le_bytes()).await?;
@@ -389,9 +402,8 @@ impl MultiStreamSender {
         let sender_clone = sender.clone();
         let block_clone = block.clone();
 
-        let data = tokio::task::spawn_blocking(move || {
-            sender_clone.read_block_owned(&block_clone)
-        }).await??;
+        let data = tokio::task::spawn_blocking(move || sender_clone.read_block_owned(&block_clone))
+            .await??;
 
         // 3. 데이터 전송
         send.write_all(&data).await?;
@@ -401,27 +413,29 @@ impl MultiStreamSender {
         let mut ack = [0u8; 4];
         match tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            recv.read_exact(&mut ack)
-        ).await {
+            recv.read_exact(&mut ack),
+        )
+        .await
+        {
             Ok(Ok(_)) if &ack == b"BACK" => {
                 // debug!("✅ 블록 {} ACK 수신", block.index);
             }
             _ => {
                 warn!("⚠️ 블록 {} ACK 타임아웃", block.index);
-                // 여기서 에러를 내면 전체 재전송 로직이 필요하나, 
+                // 여기서 에러를 내면 전체 재전송 로직이 필요하나,
                 // QUIC은 신뢰성을 보장하므로 데이터는 갔다고 가정할 수 있음.
                 // 하지만 Patch 2의 목적상 ACK가 없으면 진행률에 반영하지 않는 것이 맞으므로 에러로 처리해도 됨.
                 // 일단은 경고만 남김.
             }
         }
-        
+
         Ok(block.size as u64)
     }
 
     /// 완료 신호 전송
     async fn send_completion_signal(&self, job_id: &str) -> Result<()> {
         let (mut send, _) = self.conn.open_bi().await?;
-        
+
         send.write_all(b"DONE").await?;
         send.write_all(job_id.as_bytes()).await?;
         send.finish()?;
@@ -432,7 +446,6 @@ impl MultiStreamSender {
 }
 
 use tokio::io::AsyncSeekExt;
-
 
 /// 멀티스트림 파일 수신기 (Receiver)
 pub struct MultiStreamReceiver {
@@ -466,20 +479,22 @@ impl MultiStreamReceiver {
 
         // 매니페스트 수신
         let manifest = self.receive_manifest().await?;
-        
+
         if manifest.job_id != job_id {
             return Err(anyhow::anyhow!("Job ID mismatch"));
         }
 
         let save_path = self.save_dir.join(&manifest.file_name);
-        
+
         // 저장 디렉토리 생성
         if let Some(parent) = save_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        info!("📥 파일 수신 시작: {} ({} bytes, {} 블록)", 
-              manifest.file_name, manifest.file_size, manifest.total_blocks);
+        info!(
+            "📥 파일 수신 시작: {} ({} bytes, {} 블록)",
+            manifest.file_name, manifest.file_size, manifest.total_blocks
+        );
 
         // 파일 생성 및 크기 예약
         let file = tokio::fs::OpenOptions::new()
@@ -495,7 +510,7 @@ impl MultiStreamReceiver {
         let received_blocks = Arc::new(RwLock::new(HashMap::<u32, bool>::new()));
         let bytes_received = Arc::new(RwLock::new(0u64));
         // Receiver는 수신 즉시가 Acked이므로 별도 필드 불필요 (bytes_received == bytes_acked)
-        
+
         let start_time = std::time::Instant::now();
         let speed_calc = self.speed_calculator.clone();
 
@@ -513,11 +528,8 @@ impl MultiStreamReceiver {
                     match &marker {
                         b"BLCK" => {
                             // 블록 수신
-                            let result = Self::receive_block(
-                                &mut send,
-                                &mut recv,
-                                &save_path,
-                            ).await;
+                            let result =
+                                Self::receive_block(&mut send, &mut recv, &save_path).await;
 
                             if let Ok((block_index, block_size)) = result {
                                 // 상태 업데이트
@@ -541,16 +553,18 @@ impl MultiStreamReceiver {
                                         calc.get_speed()
                                     };
 
-                                    let _ = tx.send(MultiStreamProgress {
-                                        job_id: job_id.to_string(),
-                                        blocks_completed: blocks_done,
-                                        total_blocks: manifest.total_blocks,
-                                        bytes_transferred: bytes_done,
-                                        acknowledged_bytes: bytes_done, // Receiver는 항상 일치
-                                        total_bytes: manifest.file_size,
-                                        active_streams: 0,
-                                        speed_bps: speed,
-                                    }).await;
+                                    let _ = tx
+                                        .send(MultiStreamProgress {
+                                            job_id: job_id.to_string(),
+                                            blocks_completed: blocks_done,
+                                            total_blocks: manifest.total_blocks,
+                                            bytes_transferred: bytes_done,
+                                            acknowledged_bytes: bytes_done, // Receiver는 항상 일치
+                                            total_bytes: manifest.file_size,
+                                            active_streams: 0,
+                                            speed_bps: speed,
+                                        })
+                                        .await;
                                 }
                             }
                         }
@@ -577,20 +591,23 @@ impl MultiStreamReceiver {
         // 모든 블록 수신 확인
         let received = received_blocks.read().await;
         if received.len() as u32 != manifest.total_blocks {
-            warn!("⚠️ 일부 블록 누락: {}/{}", received.len(), manifest.total_blocks);
+            warn!(
+                "⚠️ 일부 블록 누락: {}/{}",
+                received.len(),
+                manifest.total_blocks
+            );
         }
 
         info!("✅ 멀티스트림 수신 완료: {:?}", save_path);
-        
+
         // 속도 계산기 리셋
         {
             let mut calc = self.speed_calculator.write().await;
             calc.reset();
         }
-        
+
         Ok(save_path)
     }
-
 
     /// 매니페스트 수신
     async fn receive_manifest(&self) -> Result<MultiStreamManifest> {

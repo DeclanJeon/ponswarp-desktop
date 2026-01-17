@@ -42,8 +42,8 @@ pub struct BootstrapDiscovery {
 
 impl BootstrapDiscovery {
     pub fn new(event_tx: mpsc::Sender<BootstrapDiscoveryEvent>) -> anyhow::Result<Self> {
-        let daemon = ServiceDaemon::new()
-            .map_err(|e| anyhow::anyhow!("mDNS 데몬 생성 실패: {}", e))?;
+        let daemon =
+            ServiceDaemon::new().map_err(|e| anyhow::anyhow!("mDNS 데몬 생성 실패: {}", e))?;
 
         Ok(Self {
             daemon,
@@ -92,10 +92,7 @@ impl BootstrapDiscovery {
                                 drop(nodes_guard);
 
                                 if is_new {
-                                    info!(
-                                        "🎯 부트스트랩 노드 발견: {} @ {}",
-                                        node_id, socket_addr
-                                    );
+                                    info!("🎯 부트스트랩 노드 발견: {} @ {}", node_id, socket_addr);
                                     let _ = event_tx
                                         .send(BootstrapDiscoveryEvent::NodeDiscovered(node))
                                         .await;
@@ -106,9 +103,8 @@ impl BootstrapDiscovery {
                             let mut nodes_guard = nodes.write().await;
                             if nodes_guard.remove(&name).is_some() {
                                 info!("👋 부트스트랩 노드 사라짐: {}", name);
-                                let _ = event_tx
-                                    .send(BootstrapDiscoveryEvent::NodeLost(name))
-                                    .await;
+                                let _ =
+                                    event_tx.send(BootstrapDiscoveryEvent::NodeLost(name)).await;
                             }
                         }
                         _ => {}

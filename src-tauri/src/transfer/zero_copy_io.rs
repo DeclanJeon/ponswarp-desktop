@@ -5,17 +5,12 @@
 //! - Windows: Overlapped I/O / TransmitFile
 //! - 공통: Memory-mapped I/O (mmap)
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::fs::File;
 
 use anyhow::Result;
 use tracing::{info, warn};
-
-
-
-
-
 
 /// Zero-Copy I/O 엔진
 pub struct ZeroCopyEngine {
@@ -26,7 +21,6 @@ pub struct ZeroCopyEngine {
 /// I/O 방식
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum IoMethod {
-
     /// Memory-mapped I/O
     Mmap,
     /// Linux io_uring (커널 5.1+)
@@ -73,7 +67,9 @@ impl ZeroCopyEngine {
             if let Some(ver_str) = version.split_whitespace().nth(2) {
                 let parts: Vec<&str> = ver_str.split('.').collect();
                 if parts.len() >= 2 {
-                    if let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                    if let (Ok(major), Ok(minor)) =
+                        (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+                    {
                         // 커널 5.1 이상이면 io_uring 지원
                         return major > 5 || (major == 5 && minor >= 1);
                     }
@@ -88,8 +84,6 @@ impl ZeroCopyEngine {
         self.io_method
     }
 }
-
-
 
 /// 블록 정보 (멀티스트림 전송용)
 #[derive(Debug, Clone)]
@@ -108,12 +102,12 @@ pub struct BlockInfo {
 pub fn split_file_into_blocks(file_size: u64, block_size: usize) -> Vec<BlockInfo> {
     let block_size = block_size as u64;
     let total_blocks = ((file_size + block_size - 1) / block_size) as u32;
-    
+
     (0..total_blocks)
         .map(|i| {
             let offset = i as u64 * block_size;
             let size = std::cmp::min(block_size, file_size - offset) as u32;
-            
+
             BlockInfo {
                 index: i,
                 offset,
@@ -123,8 +117,6 @@ pub fn split_file_into_blocks(file_size: u64, block_size: usize) -> Vec<BlockInf
         })
         .collect()
 }
-
-
 
 // ============================================================================
 // Linux io_uring 지원 (고성능 비동기 I/O)
@@ -176,7 +168,7 @@ impl HighPerformanceFileSender {
                     #[cfg(target_os = "linux")]
                     libc::madvise(m.as_ptr() as *mut _, m.len(), libc::MADV_SEQUENTIAL);
                     Some(Arc::new(m))
-                },
+                }
                 Err(e) => {
                     warn!("mmap 실패 (Buffered I/O 사용): {}", e);
                     None
@@ -223,13 +215,15 @@ impl HighPerformanceFileSender {
         use std::io::{Read, Seek, SeekFrom};
         let mut file = File::open(&self.file_path)?;
         file.seek(SeekFrom::Start(block.offset))?;
-        
+
         let mut buffer = vec![0u8; block.size as usize];
         // read_exact 대신 read를 사용하여 EOF 처리 유연성 확보
         let mut bytes_read = 0;
         while bytes_read < block.size as usize {
             let n = file.read(&mut buffer[bytes_read..])?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             bytes_read += n;
         }
         buffer.truncate(bytes_read);
@@ -265,7 +259,7 @@ impl HighPerformanceFileSender {
             if end <= mmap.len() {
                 // 🚀 [핵심] 여기서 Page Fault가 발생해도 Worker 스레드만 멈춤 (메인 전송 스레드는 안전)
                 let slice = &mmap[start..end];
-                
+
                 // 🚀 [성능] OS 캐시를 활용한 고속 복사 (실제 디스크 접근은 최소화)
                 // madvise(MADV_SEQUENTIAL) 설정으로 순차 접근 패턴 힌트 제공됨
                 return Ok(slice.to_vec()); // 메모리 복사 1회 발생 (필수 불가결)
@@ -314,7 +308,7 @@ impl HighPerformanceFileReceiver {
     /// 특정 오프셋에 블록 쓰기
     pub fn write_block_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
         use std::io::{Seek, SeekFrom, Write};
-        
+
         self.file.seek(SeekFrom::Start(offset))?;
         self.file.write_all(data)?;
         self.bytes_written += data.len() as u64;
@@ -346,7 +340,7 @@ mod tests {
     #[test]
     fn test_split_file_into_blocks() {
         let blocks = split_file_into_blocks(100 * 1024 * 1024, 16 * 1024 * 1024);
-        
+
         assert_eq!(blocks.len(), 7); // 100MB / 16MB = 6.25 -> 7 blocks
         assert_eq!(blocks[0].offset, 0);
         assert_eq!(blocks[0].size, 16 * 1024 * 1024);

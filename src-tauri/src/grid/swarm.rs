@@ -28,10 +28,7 @@ pub enum SwarmCommand {
     /// Have 브로드캐스트
     BroadcastHave(u32),
     /// 특정 피어에게 조각 요청
-    RequestPiece {
-        peer_id: String,
-        piece_index: u32,
-    },
+    RequestPiece { peer_id: String, piece_index: u32 },
     /// 전송 시작 (Seeder)
     StartSeeding {
         file_path: PathBuf,
@@ -367,7 +364,8 @@ impl GridSwarm {
                 piece_index,
             } => {
                 debug!("📢 Have 수신: {} has piece {}", peer_id, piece_index);
-                self.scheduler.peer_has_piece(&peer_id, piece_index as usize);
+                self.scheduler
+                    .peer_has_piece(&peer_id, piece_index as usize);
             }
 
             PeerEvent::PieceReceived {
@@ -380,11 +378,11 @@ impl GridSwarm {
 
                 // 조각 검증 및 파일에 저장
                 let mut pm = self.piece_manager.write().await;
-                
+
                 match pm.write_piece(piece_index as usize, &data).await {
                     Ok(()) => {
                         drop(pm);
-                        
+
                         self.scheduler.mark_completed(piece_index as usize);
 
                         // Have 브로드캐스트
@@ -402,7 +400,10 @@ impl GridSwarm {
                         }
                     }
                     Err(e) => {
-                        warn!("❌ 조각 저장 실패: {} from {} - {}", piece_index, peer_id, e);
+                        warn!(
+                            "❌ 조각 저장 실패: {} from {} - {}",
+                            piece_index, peer_id, e
+                        );
                     }
                 }
             }
@@ -423,7 +424,10 @@ impl GridSwarm {
                 }
             }
 
-            PeerEvent::InterestChanged { peer_id, interested } => {
+            PeerEvent::InterestChanged {
+                peer_id,
+                interested,
+            } => {
                 if let Some(peer) = self.peers.get_mut(&peer_id) {
                     peer.state.peer_interested = interested;
                 }
@@ -439,7 +443,10 @@ impl GridSwarm {
     async fn broadcast_have(&self, piece_index: u32) {
         let msg = GridMessage::Have { piece_index };
         for (_, peer) in &self.peers {
-            let _ = peer.command_tx.send(PeerCommand::SendMessage(msg.clone())).await;
+            let _ = peer
+                .command_tx
+                .send(PeerCommand::SendMessage(msg.clone()))
+                .await;
         }
     }
 
@@ -460,7 +467,7 @@ impl GridSwarm {
         if let Some(peer) = self.peers.get(peer_id) {
             // PieceManager에서 조각 정보 확인
             let pm = self.piece_manager.read().await;
-            
+
             if !pm.get_bitfield().has(piece_index as usize) {
                 warn!("요청된 조각 {}을 보유하지 않음", piece_index);
                 return;

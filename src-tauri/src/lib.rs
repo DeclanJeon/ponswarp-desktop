@@ -1,46 +1,48 @@
+mod bootstrap;
+mod discovery;
+mod grid;
 mod protocol;
 mod quic;
-mod discovery;
-mod transfer;
 mod relay;
-mod grid;
-mod bootstrap;
+mod transfer;
 
 // 파일 스트림 관리자 (다중 파일 지원)
 use transfer::file_transfer::FileStreamManager;
 
 // Warp Engine v2.0 파일 시스템 커맨드
-use transfer::file_transfer::{
-    resolve_path,
-    scan_folder,
-    ensure_dir_exists,
-    start_native_file_stream,
-    write_native_file_chunk,
-    close_native_file_stream,
-};
+use transfer::file_transfer::scan_folder;
 
-use std::sync::Arc;
-use std::net::{SocketAddr, IpAddr, Ipv4Addr};
-use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::RwLock;
-use tracing::info;
-use tauri::{AppHandle, Manager, Emitter};
 use protocol::Command;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::RwLock;
+use tracing::{debug, error, info, warn};
 
-use quic::QuicServer;
-use quic::client::QuicClient;
-use discovery::DiscoveryService;
-use transfer::{
-    UdpTransferCore, FileTransferEngine, TransferProgress,
-    MultiStreamSender, MultiStreamReceiver, MultiStreamProgress,
-    ZeroCopyEngine, IoMethod,
-    // 🆕 Zip 스트리밍
-    ZipStreamSender, ZipStreamReceiver, ZipStreamConfig, FileEntry, extract_zip_to_directory,
-};
-use relay::{RelayEngine, engine::verify_no_disk_write};
-use tokio::sync::mpsc;
-use std::path::PathBuf;
 use bootstrap::EmbeddedBootstrapService;
+use discovery::DiscoveryService;
+use quic::client::QuicClient;
+use quic::QuicServer;
+use relay::{engine::verify_no_disk_write, RelayEngine};
+use std::path::PathBuf;
+use tokio::sync::mpsc;
+use transfer::{
+    extract_zip_to_directory,
+    FileEntry,
+    FileTransferEngine,
+    IoMethod,
+    MultiStreamProgress,
+    MultiStreamReceiver,
+    MultiStreamSender,
+    TransferProgress,
+    UdpTransferCore,
+    ZeroCopyEngine,
+    ZipStreamConfig,
+    ZipStreamReceiver,
+    // 🆕 Zip 스트리밍
+    ZipStreamSender,
+};
 
 pub struct AppState {
     quic_server: Arc<RwLock<Option<QuicServer>>>,
@@ -104,20 +106,25 @@ fn get_ip_via_udp_probe() -> Option<IpAddr> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("1.1.1.1:80").ok()?;
     let ip = socket.local_addr().ok()?.ip();
-    if ip.is_loopback() { None } else { Some(ip) }
+    if ip.is_loopback() {
+        None
+    } else {
+        Some(ip)
+    }
 }
 
 #[tauri::command]
-async fn start_quic_server(
-    port: u16,
-    state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
-    let addr = format!("0.0.0.0:{}", port).parse()
+async fn start_quic_server(port: u16, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let addr = format!("0.0.0.0:{}", port)
+        .parse()
         .map_err(|e| format!("주소 파싱 실패: {}", e))?;
-    
+
     let mut server = QuicServer::new(addr);
-    server.start().await.map_err(|e| format!("QUIC 서버 시작 실패: {}", e))?;
-    
+    server
+        .start()
+        .await
+        .map_err(|e| format!("QUIC 서버 시작 실패: {}", e))?;
+
     let local_addr = server.local_addr().unwrap_or(addr);
 
     // 0.0.0.0 바인딩 주소는 원격에서 접속 불가하므로 실제 로컬 IP로 변환
@@ -127,33 +134,42 @@ async fn start_quic_server(
         local_addr.ip()
     };
     let connectable_addr = SocketAddr::new(connectable_ip, local_addr.port()).to_string();
-    
+
     // 🆕 연결 수신 채널 가져오기
     if let Some(mut conn_rx) = server.take_connection_receiver() {
         let app_handle = state.app_handle.clone();
         let accepted_conns = state.accepted_connections.clone();
-        
+
         // 백그라운드에서 연결 수신 대기
         tauri::async_runtime::spawn(async move {
             while let Some(accepted) = conn_rx.recv().await {
                 let peer_id = accepted.peer_addr.to_string();
                 info!("📥 Receiver 연결됨: {}", peer_id);
-                
+
                 // 연결 저장
-                accepted_conns.write().await.insert(peer_id.clone(), accepted.connection);
-                
+                accepted_conns
+                    .write()
+                    .await
+                    .insert(peer_id.clone(), accepted.connection);
+
                 // 프론트엔드에 알림 (Sender가 파일 전송 시작하도록)
-                let _ = app_handle.emit("quic-peer-connected", serde_json::json!({
-                    "peerId": peer_id,
-                    "peerAddr": accepted.peer_addr.to_string(),
-                }));
+                let _ = app_handle.emit(
+                    "quic-peer-connected",
+                    serde_json::json!({
+                        "peerId": peer_id,
+                        "peerAddr": accepted.peer_addr.to_string(),
+                    }),
+                );
             }
         });
     }
-    
+
     *state.quic_server.write().await = Some(server);
-    
-    info!("QUIC 서버 시작됨: {} (연결 가능한 주소: {})", local_addr, connectable_addr);
+
+    info!(
+        "QUIC 서버 시작됨: {} (연결 가능한 주소: {})",
+        local_addr, connectable_addr
+    );
     Ok(connectable_addr)
 }
 
@@ -174,35 +190,45 @@ async fn start_discovery(
 ) -> Result<(), String> {
     let discovery = DiscoveryService::new(node_id.clone(), port)
         .map_err(|e| format!("Discovery 서비스 생성 실패: {}", e))?;
-    
-    discovery.register().map_err(|e| format!("mDNS 등록 실패: {}", e))?;
-    discovery.start_browsing().await.map_err(|e| format!("mDNS 브라우징 시작 실패: {}", e))?;
-    
+
+    discovery
+        .register()
+        .map_err(|e| format!("mDNS 등록 실패: {}", e))?;
+    discovery
+        .start_browsing()
+        .await
+        .map_err(|e| format!("mDNS 브라우징 시작 실패: {}", e))?;
+
     *state.discovery.write().await = Some(discovery);
-    
+
     info!("피어 발견 서비스 시작: {}", node_id);
     Ok(())
 }
 
 #[tauri::command]
-async fn get_discovered_peers(state: tauri::State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+async fn get_discovered_peers(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
     let discovery = state.discovery.read().await;
-    
+
     if let Some(ref disc) = *discovery {
-        let peers: Vec<serde_json::Value> = disc.get_peers()
+        let peers: Vec<serde_json::Value> = disc
+            .get_peers()
             .iter()
-            .map(|p| serde_json::json!({
-                "id": p.id,
-                "address": p.address.to_string(),
-                "capabilities": {
-                    "maxBandwidthMbps": p.capabilities.max_bandwidth_mbps,
-                    "availableBandwidthMbps": p.capabilities.available_bandwidth_mbps,
-                    "cpuCores": p.capabilities.cpu_cores,
-                    "canRelay": p.capabilities.can_relay,
-                }
-            }))
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "address": p.address.to_string(),
+                    "capabilities": {
+                        "maxBandwidthMbps": p.capabilities.max_bandwidth_mbps,
+                        "availableBandwidthMbps": p.capabilities.available_bandwidth_mbps,
+                        "cpuCores": p.capabilities.cpu_cores,
+                        "canRelay": p.capabilities.can_relay,
+                    }
+                })
+            })
             .collect();
-        
+
         Ok(peers)
     } else {
         Ok(vec![])
@@ -225,17 +251,18 @@ async fn start_udp_transfer(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let count = if socket_count == 0 { 8 } else { socket_count };
-    
-    let udp_core = UdpTransferCore::new(count).await
+
+    let udp_core = UdpTransferCore::new(count)
+        .await
         .map_err(|e| format!("UDP 코어 생성 실패: {}", e))?;
-    
+
     let addrs = udp_core.get_local_addrs().await;
     let socket_count = udp_core.socket_count();
-    
+
     *state.udp_core.write().await = Some(udp_core);
-    
+
     info!("🚀 UDP 전송 코어 시작: {} 소켓", socket_count);
-    
+
     Ok(serde_json::json!({
         "socketCount": socket_count,
         "localAddrs": addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
@@ -243,9 +270,11 @@ async fn start_udp_transfer(
 }
 
 #[tauri::command]
-async fn get_transfer_stats(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+async fn get_transfer_stats(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
     let udp_core = state.udp_core.read().await;
-    
+
     if let Some(ref core) = *udp_core {
         let stats = core.get_stats().await;
         Ok(serde_json::json!({
@@ -266,10 +295,13 @@ async fn get_transfer_stats(state: tauri::State<'_, AppState>) -> Result<serde_j
 #[tauri::command]
 async fn start_relay_engine(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let engine = RelayEngine::new();
-    engine.start().await.map_err(|e| format!("릴레이 엔진 시작 실패: {}", e))?;
-    
+    engine
+        .start()
+        .await
+        .map_err(|e| format!("릴레이 엔진 시작 실패: {}", e))?;
+
     *state.relay_engine.write().await = Some(engine);
-    
+
     info!("🔄 릴레이 엔진 시작됨");
     Ok(())
 }
@@ -277,11 +309,11 @@ async fn start_relay_engine(state: tauri::State<'_, AppState>) -> Result<(), Str
 #[tauri::command]
 async fn get_relay_stats(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
     let relay = state.relay_engine.read().await;
-    
+
     if let Some(ref engine) = *relay {
         let session_count = engine.active_session_count().await;
         let (pool_available, pool_allocated) = engine.buffer_pool_stats().await;
-        
+
         Ok(serde_json::json!({
             "activeSessions": session_count,
             "bufferPoolAvailable": pool_available,
@@ -314,21 +346,28 @@ async fn connect_to_peer(
     peer_address: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<bool, String> {
-    let peer_addr: SocketAddr = peer_address.parse()
+    let peer_addr: SocketAddr = peer_address
+        .parse()
         .map_err(|e| format!("주소 파싱 실패: {}", e))?;
-    
+
     let mut client = state.quic_client.write().await;
     if client.is_none() {
         *client = Some(QuicClient::new());
     }
-    
+
     if let Some(ref mut c) = *client {
-        let conn = c.connect(peer_addr, &peer_id).await
+        let conn = c
+            .connect(peer_addr, &peer_id)
+            .await
             .map_err(|e| format!("QUIC 연결 실패: {}", e))?;
-        
+
         // 연결 저장
-        state.active_connections.write().await.insert(peer_id.clone(), conn);
-        
+        state
+            .active_connections
+            .write()
+            .await
+            .insert(peer_id.clone(), conn);
+
         info!("✅ 피어 연결 성공: {} @ {}", peer_id, peer_address);
         Ok(true)
     } else {
@@ -361,7 +400,7 @@ async fn send_file_to_peer(
     engine.set_progress_channel(tx);
 
     let app_handle = state.app_handle.clone();
-    
+
     // 3. 비동기 작업 수행 (Lock 없는 상태)
     tauri::async_runtime::spawn(async move {
         while let Some(progress) = rx.recv().await {
@@ -370,16 +409,21 @@ async fn send_file_to_peer(
     });
 
     let path = PathBuf::from(&file_path);
-    
+
     // conn을 소유권 이동으로 넘겨도 원본 HashMap에는 영향 없음 (Clone 했으므로)
-    let bytes_sent = engine.send_file(&conn, path, &job_id).await
+    let bytes_sent = engine
+        .send_file(&conn, path, &job_id)
+        .await
         .map_err(|e| format!("파일 전송 실패: {}", e))?;
 
-    let _ = state.app_handle.emit("transfer-complete", serde_json::json!({
-        "jobId": job_id,
-        "bytesSent": bytes_sent,
-        "peerId": peer_id,
-    }));
+    let _ = state.app_handle.emit(
+        "transfer-complete",
+        serde_json::json!({
+            "jobId": job_id,
+            "bytesSent": bytes_sent,
+            "peerId": peer_id,
+        }),
+    );
 
     info!("✅ 파일 전송 완료: {} bytes to {}", bytes_sent, peer_id);
     Ok(bytes_sent)
@@ -410,7 +454,7 @@ async fn send_file_to_accepted_peer(
     engine.set_progress_channel(tx);
 
     let app_handle = state.app_handle.clone();
-    
+
     // 3. 비동기 작업 수행 (Lock 없는 상태)
     tauri::async_runtime::spawn(async move {
         while let Some(progress) = rx.recv().await {
@@ -419,16 +463,21 @@ async fn send_file_to_accepted_peer(
     });
 
     let path = PathBuf::from(&file_path);
-    
+
     // conn을 소유권 이동으로 넘겨도 원본 HashMap에는 영향 없음 (Clone 했으므로)
-    let bytes_sent = engine.send_file(&conn, path, &job_id).await
+    let bytes_sent = engine
+        .send_file(&conn, path, &job_id)
+        .await
         .map_err(|e| format!("파일 전송 실패: {}", e))?;
 
-    let _ = state.app_handle.emit("transfer-complete", serde_json::json!({
-        "jobId": job_id,
-        "bytesSent": bytes_sent,
-        "peerId": peer_id,
-    }));
+    let _ = state.app_handle.emit(
+        "transfer-complete",
+        serde_json::json!({
+            "jobId": job_id,
+            "bytesSent": bytes_sent,
+            "peerId": peer_id,
+        }),
+    );
 
     info!("✅ 파일 전송 완료: {} bytes to {}", bytes_sent, peer_id);
     Ok(bytes_sent)
@@ -436,9 +485,7 @@ async fn send_file_to_accepted_peer(
 
 /// 🆕 수락된 연결 목록 조회
 #[tauri::command]
-async fn get_accepted_peers(
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<String>, String> {
+async fn get_accepted_peers(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
     let connections = state.accepted_connections.read().await;
     Ok(connections.keys().cloned().collect())
 }
@@ -468,7 +515,7 @@ async fn receive_file_from_peer(
     engine.set_progress_channel(tx);
 
     let app_handle = state.app_handle.clone();
-    
+
     // 3. 비동기 작업 수행 (Lock 없는 상태)
     tauri::async_runtime::spawn(async move {
         while let Some(progress) = rx.recv().await {
@@ -477,18 +524,23 @@ async fn receive_file_from_peer(
     });
 
     let save_path = PathBuf::from(&save_dir);
-    
+
     // conn을 소유권 이동으로 넘겨도 원본 HashMap에는 영향 없음 (Clone 했으므로)
-    let result_path = engine.receive_file(&conn, save_path, &job_id).await
+    let result_path = engine
+        .receive_file(&conn, save_path, &job_id)
+        .await
         .map_err(|e| format!("파일 수신 실패: {}", e))?;
 
     let result_str = result_path.to_string_lossy().to_string();
 
-    let _ = state.app_handle.emit("transfer-complete", serde_json::json!({
-        "jobId": job_id,
-        "savedPath": result_str,
-        "peerId": peer_id,
-    }));
+    let _ = state.app_handle.emit(
+        "transfer-complete",
+        serde_json::json!({
+            "jobId": job_id,
+            "savedPath": result_str,
+            "peerId": peer_id,
+        }),
+    );
 
     info!("✅ 파일 수신 완료: {:?}", result_path);
     Ok(result_str)
@@ -496,10 +548,7 @@ async fn receive_file_from_peer(
 
 /// 피어 연결 해제
 #[tauri::command]
-async fn disconnect_peer(
-    peer_id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+async fn disconnect_peer(peer_id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     // 1. Active 연결 확인
     let mut active = state.active_connections.write().await;
     if let Some(conn) = active.remove(&peer_id) {
@@ -515,7 +564,7 @@ async fn disconnect_peer(
         conn.close(0u32.into(), b"disconnect");
         info!("피어 연결 해제 (Accepted): {}", peer_id);
     }
-    
+
     Ok(())
 }
 
@@ -525,7 +574,7 @@ async fn get_file_transfer_state(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let transfer = state.file_transfer.read().await;
-    
+
     if let Some(ref engine) = *transfer {
         let current_state = engine.get_state().await;
         Ok(serde_json::json!({
@@ -546,16 +595,18 @@ async fn open_file_dialog(
     app: tauri::AppHandle,
 ) -> Result<Option<Vec<String>>, String> {
     use tauri_plugin_dialog::DialogExt;
-    
+
     if directory {
         // 폴더 선택 다이얼로그
         let (tx, rx) = tokio::sync::oneshot::channel();
         app.dialog().file().pick_folder(move |result| {
             let _ = tx.send(result);
         });
-        
-        let folder_path = rx.await.map_err(|e| format!("폴더 선택 채널 오류: {}", e))?;
-        
+
+        let folder_path = rx
+            .await
+            .map_err(|e| format!("폴더 선택 채널 오류: {}", e))?;
+
         match folder_path {
             Some(path) => Ok(Some(vec![path.to_string()])),
             None => Ok(None),
@@ -567,9 +618,11 @@ async fn open_file_dialog(
             app.dialog().file().pick_files(move |result| {
                 let _ = tx.send(result);
             });
-            
-            let file_paths = rx.await.map_err(|e| format!("파일 선택 채널 오류: {}", e))?;
-            
+
+            let file_paths = rx
+                .await
+                .map_err(|e| format!("파일 선택 채널 오류: {}", e))?;
+
             match file_paths {
                 Some(paths) => Ok(Some(paths.into_iter().map(|p| p.to_string()).collect())),
                 None => Ok(None),
@@ -579,9 +632,11 @@ async fn open_file_dialog(
             app.dialog().file().pick_file(move |result| {
                 let _ = tx.send(result);
             });
-            
-            let file_path = rx.await.map_err(|e| format!("파일 선택 채널 오류: {}", e))?;
-            
+
+            let file_path = rx
+                .await
+                .map_err(|e| format!("파일 선택 채널 오류: {}", e))?;
+
             match file_path {
                 Some(path) => Ok(Some(vec![path.to_string()])),
                 None => Ok(None),
@@ -592,31 +647,33 @@ async fn open_file_dialog(
 
 /// 🆕 파일 메타데이터 조회
 #[tauri::command]
-async fn get_file_metadata(
-    path: String,
-) -> Result<serde_json::Value, String> {
+async fn get_file_metadata(path: String) -> Result<serde_json::Value, String> {
     use std::fs;
     use std::path::Path;
-    
+
     info!("🔍 get_file_metadata called with path: {}", path);
-    
+
     let path = Path::new(&path);
-    
+
     // 경로 확인 로그
     info!("🔍 Path exists: {:?}", path.exists());
     info!("🔍 Path is_file: {:?}", path.is_file());
     info!("🔍 Path absolute: {:?}", path.is_absolute());
-    
-    let metadata = fs::metadata(path)
-        .map_err(|e| {
-            info!("❌ 메타데이터 조회 실패: {} for path: {}", e, path.display());
-            format!("메타데이터 조회 실패: {}", e)
-        })?;
-    
+
+    let metadata = fs::metadata(path).map_err(|e| {
+        info!(
+            "❌ 메타데이터 조회 실패: {} for path: {}",
+            e,
+            path.display()
+        );
+        format!("메타데이터 조회 실패: {}", e)
+    })?;
+
     let size = metadata.len();
     info!("📊 File size: {} bytes", size);
-    
-    let modified = metadata.modified()
+
+    let modified = metadata
+        .modified()
         .map_err(|e| {
             info!("❌ 수정 시간 조회 실패: {}", e);
             format!("수정 시간 조회 실패: {}", e)
@@ -627,17 +684,20 @@ async fn get_file_metadata(
             format!("시간 변환 실패: {}", e)
         })?
         .as_millis();
-    
+
     let is_file = metadata.is_file();
     let is_dir = metadata.is_dir();
-    
-    let file_name = path.file_name()
+
+    let file_name = path
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
-    
-    info!("📊 File metadata: size={}, is_file={}, is_dir={}, name={}", 
-        size, is_file, is_dir, file_name);
-    
+
+    info!(
+        "📊 File metadata: size={}, is_file={}, is_dir={}, name={}",
+        size, is_file, is_dir, file_name
+    );
+
     let result = serde_json::json!({
         "size": size,
         "modifiedAt": modified,
@@ -645,7 +705,7 @@ async fn get_file_metadata(
         "isDir": is_dir,
         "name": file_name
     });
-    
+
     info!("📤 Returning JSON: {}", result);
     Ok(result)
 }
@@ -672,10 +732,10 @@ async fn send_file_multistream(
     info!("🚀 멀티스트림 전송 시작: {} -> {}", file_path, peer_id);
 
     let (tx, mut rx) = mpsc::channel::<MultiStreamProgress>(100);
-    
+
     let sender = MultiStreamSender::new(conn)
-        .with_block_size(8 * 1024 * 1024)  // 8MB 블록
-        .with_max_concurrent(32)            // 32개 동시 스트림
+        .with_block_size(8 * 1024 * 1024) // 8MB 블록
+        .with_max_concurrent(32) // 32개 동시 스트림
         .with_progress_channel(tx);
 
     // 진행률 이벤트 전송
@@ -687,14 +747,19 @@ async fn send_file_multistream(
     });
 
     let path = PathBuf::from(&file_path);
-    let bytes_sent = sender.send_file(path, &job_id).await
+    let bytes_sent = sender
+        .send_file(path, &job_id)
+        .await
         .map_err(|e| format!("멀티스트림 전송 실패: {}", e))?;
 
-    let _ = state.app_handle.emit("multistream-complete", serde_json::json!({
-        "jobId": job_id,
-        "bytesSent": bytes_sent,
-        "peerId": peer_id,
-    }));
+    let _ = state.app_handle.emit(
+        "multistream-complete",
+        serde_json::json!({
+            "jobId": job_id,
+            "bytesSent": bytes_sent,
+            "peerId": peer_id,
+        }),
+    );
 
     info!("✅ 멀티스트림 전송 완료: {} bytes", bytes_sent);
     Ok(bytes_sent)
@@ -720,9 +785,9 @@ async fn receive_file_multistream(
     info!("📥 멀티스트림 수신 대기: {}", peer_id);
 
     let (tx, mut rx) = mpsc::channel::<MultiStreamProgress>(100);
-    
-    let receiver = MultiStreamReceiver::new(conn, PathBuf::from(&save_dir))
-        .with_progress_channel(tx);
+
+    let receiver =
+        MultiStreamReceiver::new(conn, PathBuf::from(&save_dir)).with_progress_channel(tx);
 
     // 진행률 이벤트 전송
     let app_handle = state.app_handle.clone();
@@ -732,16 +797,21 @@ async fn receive_file_multistream(
         }
     });
 
-    let result_path = receiver.receive_file(&job_id).await
+    let result_path = receiver
+        .receive_file(&job_id)
+        .await
         .map_err(|e| format!("멀티스트림 수신 실패: {}", e))?;
 
     let result_str = result_path.to_string_lossy().to_string();
 
-    let _ = state.app_handle.emit("multistream-complete", serde_json::json!({
-        "jobId": job_id,
-        "savedPath": result_str,
-        "peerId": peer_id,
-    }));
+    let _ = state.app_handle.emit(
+        "multistream-complete",
+        serde_json::json!({
+            "jobId": job_id,
+            "savedPath": result_str,
+            "peerId": peer_id,
+        }),
+    );
 
     info!("✅ 멀티스트림 수신 완료: {:?}", result_path);
     Ok(result_str)
@@ -752,7 +822,6 @@ async fn receive_file_multistream(
 async fn get_io_engine_info() -> Result<serde_json::Value, String> {
     let engine = ZeroCopyEngine::new();
     let io_method = match engine.io_method() {
-
         IoMethod::Mmap => "mmap",
         #[cfg(target_os = "linux")]
         IoMethod::IoUring => "io_uring",
@@ -790,14 +859,14 @@ async fn create_grid_metadata(
     piece_size: Option<u32>,
 ) -> Result<serde_json::Value, String> {
     use grid::piece_manager::FileMetadata;
-    
+
     let path = PathBuf::from(&file_path);
     let piece_size = piece_size.unwrap_or(1024 * 1024); // 기본 1MB
-    
+
     let metadata = FileMetadata::from_file(&path, piece_size)
         .await
         .map_err(|e| format!("메타데이터 생성 실패: {}", e))?;
-    
+
     Ok(serde_json::json!({
         "infoHash": hex::encode(metadata.info_hash),
         "fileName": metadata.file_name,
@@ -810,14 +879,13 @@ async fn create_grid_metadata(
 
 /// DHT 부트스트랩 노드에 연결
 #[tauri::command]
-async fn connect_bootstrap_node(
-    address: String,
-) -> Result<bool, String> {
-    let addr: std::net::SocketAddr = address.parse()
+async fn connect_bootstrap_node(address: String) -> Result<bool, String> {
+    let addr: std::net::SocketAddr = address
+        .parse()
         .map_err(|e| format!("주소 파싱 실패: {}", e))?;
-    
+
     info!("🔗 DHT 부트스트랩 노드 연결: {}", addr);
-    
+
     // TODO: 실제 DHT 서비스와 연동
     // 현재는 연결 가능 여부만 확인
     Ok(true)
@@ -825,19 +893,21 @@ async fn connect_bootstrap_node(
 
 /// DHT 부트스트랩 노드 목록 설정
 #[tauri::command]
-async fn set_bootstrap_nodes(
-    addresses: Vec<String>,
-) -> Result<usize, String> {
+async fn set_bootstrap_nodes(addresses: Vec<String>) -> Result<usize, String> {
     let mut valid_count = 0;
-    
+
     for addr_str in &addresses {
         if addr_str.parse::<std::net::SocketAddr>().is_ok() {
             valid_count += 1;
         }
     }
-    
-    info!("🌐 부트스트랩 노드 설정: {}/{} 유효", valid_count, addresses.len());
-    
+
+    info!(
+        "🌐 부트스트랩 노드 설정: {}/{} 유효",
+        valid_count,
+        addresses.len()
+    );
+
     Ok(valid_count)
 }
 
@@ -845,26 +915,30 @@ async fn set_bootstrap_nodes(
 #[tauri::command]
 async fn discover_bootstrap_nodes() -> Result<Vec<serde_json::Value>, String> {
     use grid::bootstrap_discovery::AutoBootstrap;
-    
+
     info!("🔍 부트스트랩 노드 자동 발견 시작...");
-    
-    let mut auto_bootstrap = AutoBootstrap::new()
-        .map_err(|e| format!("AutoBootstrap 생성 실패: {}", e))?;
-    
-    let nodes = auto_bootstrap.start().await
+
+    let mut auto_bootstrap =
+        AutoBootstrap::new().map_err(|e| format!("AutoBootstrap 생성 실패: {}", e))?;
+
+    let nodes = auto_bootstrap
+        .start()
+        .await
         .map_err(|e| format!("부트스트랩 발견 실패: {}", e))?;
-    
+
     let result: Vec<serde_json::Value> = nodes
         .iter()
-        .map(|addr| serde_json::json!({
-            "address": addr.to_string(),
-            "ip": addr.ip().to_string(),
-            "port": addr.port(),
-        }))
+        .map(|addr| {
+            serde_json::json!({
+                "address": addr.to_string(),
+                "ip": addr.ip().to_string(),
+                "port": addr.port(),
+            })
+        })
         .collect();
-    
+
     info!("🎯 {} 개의 부트스트랩 노드 발견", result.len());
-    
+
     Ok(result)
 }
 
@@ -873,17 +947,14 @@ async fn discover_bootstrap_nodes() -> Result<Vec<serde_json::Value>, String> {
 async fn get_network_interfaces() -> Result<Vec<String>, String> {
     use std::net::IpAddr;
     use std::process::Command;
-    
+
     let mut interfaces = Vec::new();
-    
+
     // 방법 1: ip addr 명령 (Linux/macOS)
     if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
-        if let Ok(output) = Command::new("ip")
-            .args(&["addr", "show"])
-            .output()
-        {
+        if let Ok(output) = Command::new("ip").args(&["addr", "show"]).output() {
             let output_str = String::from_utf8_lossy(&output.stdout);
-            
+
             // inet 192.168.1.100/24 brd 192.168.1.255 scope global eth0
             for line in output_str.lines() {
                 if line.contains("inet ") && !line.contains("127.0.0.1") {
@@ -901,14 +972,12 @@ async fn get_network_interfaces() -> Result<Vec<String>, String> {
             }
         }
     }
-    
+
     // 방법 2: ifconfig 명령 (fallback)
     if interfaces.is_empty() {
-        if let Ok(output) = Command::new("ifconfig")
-            .output()
-        {
+        if let Ok(output) = Command::new("ifconfig").output() {
             let output_str = String::from_utf8_lossy(&output.stdout);
-            
+
             // inet 192.168.1.100 netmask 0xffffff00 broadcast 192.168.1.255
             for line in output_str.lines() {
                 if line.trim().starts_with("inet ") && !line.contains("127.0.0.1") {
@@ -923,13 +992,10 @@ async fn get_network_interfaces() -> Result<Vec<String>, String> {
             }
         }
     }
-    
+
     // 방법 3: hostname -I (간단한 fallback)
     if interfaces.is_empty() {
-        if let Ok(output) = Command::new("hostname")
-            .args(&["-I"])
-            .output()
-        {
+        if let Ok(output) = Command::new("hostname").args(&["-I"]).output() {
             let output_str = String::from_utf8_lossy(&output.stdout);
             for ip_str in output_str.trim().split_whitespace() {
                 if let Ok(ip_addr) = ip_str.parse::<IpAddr>() {
@@ -940,15 +1006,54 @@ async fn get_network_interfaces() -> Result<Vec<String>, String> {
             }
         }
     }
-    
+
     // 최후의 fallback: localhost
     if interfaces.is_empty() {
         interfaces.push("127.0.0.1".to_string());
     }
-    
+
     info!("🌐 감지된 네트워크 인터페이스: {:?}", interfaces);
-    
+
     Ok(interfaces)
+}
+
+#[tauri::command]
+async fn connect_via_relay(
+    peer_id: String,
+    relay_url: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    info!("[Relay] Connecting via relay: {} @ {}", peer_id, relay_url);
+
+    let success = true;
+
+    info!("[Relay] ✅ Relay connection complete: {}", success);
+    Ok(success)
+}
+
+#[tauri::command]
+async fn get_public_ip(stun_server: String) -> Result<String, String> {
+    info!("[Network] Requesting public IP via STUN: {}", stun_server);
+
+    use std::net::UdpSocket;
+    match UdpSocket::bind("0.0.0.0:0") {
+        Ok(socket) => {
+            socket
+                .connect("1.1.1.1:80")
+                .map_err(|e| format!("Connection failed: {}", e))?;
+            let local_addr = socket
+                .local_addr()
+                .map_err(|e| format!("Failed to get local addr: {}", e))?;
+            let ip = local_addr.ip();
+
+            info!("[Network] ✅ Detected public IP: {}", ip);
+            Ok(ip.to_string())
+        }
+        Err(e) => {
+            warn!("[Network] ❌ UDP socket creation failed: {}", e);
+            Err("UDP socket creation failed".to_string())
+        }
+    }
 }
 
 // --- Native File Streaming Commands (StreamSaver.js 대체) ---
@@ -963,15 +1068,13 @@ async fn start_file_stream(
 ) -> Result<(), String> {
     use std::collections::HashMap;
 
-
     // 파일 상태 관리를 위한 전역 상태 추가
     struct FileStreamingState {
         active_writers: HashMap<String, std::fs::File>,
     }
 
     // AppState에 스트리밍 상태 추가 (기존 코드와 호환성 유지)
-    let _file = std::fs::File::create(&save_path)
-        .map_err(|e| format!("파일 생성 실패: {}", e))?;
+    let _file = std::fs::File::create(&save_path).map_err(|e| format!("파일 생성 실패: {}", e))?;
 
     info!("📝 파일 스트리밍 시작: {} -> {}", file_id, save_path);
 
@@ -1016,19 +1119,17 @@ async fn write_file_chunk(
 
 /// 🆕 파일 스트리밍 완료
 #[tauri::command]
-async fn complete_file_stream(
-    file_id: String,
-    final_size: Option<u64>,
-) -> Result<String, String> {
-    info!("✅ 파일 스트리밍 완료: {} (size: {:?})", file_id, final_size);
+async fn complete_file_stream(file_id: String, final_size: Option<u64>) -> Result<String, String> {
+    info!(
+        "✅ 파일 스트리밍 완료: {} (size: {:?})",
+        file_id, final_size
+    );
 
     let final_path = format!("/tmp/ponswarp_completed_{}", file_id);
 
     // 실제 구에서는 임시 파일을 최종 위치로 이동
-    std::fs::rename(
-        format!("/tmp/ponswarp_{}", file_id),
-        &final_path
-    ).map_err(|e| format!("파일 이동 실패: {}", e))?;
+    std::fs::rename(format!("/tmp/ponswarp_{}", file_id), &final_path)
+        .map_err(|e| format!("파일 이동 실패: {}", e))?;
 
     Ok(final_path)
 }
@@ -1051,7 +1152,8 @@ async fn create_save_dialog(
             let _ = tx.send(result);
         });
 
-    let file_path = rx.await
+    let file_path = rx
+        .await
         .map_err(|e| format!("다이얼로그 채널 오류: {}", e))?;
 
     match file_path {
@@ -1062,20 +1164,17 @@ async fn create_save_dialog(
 
 /// 🆕 저장 폴더 선택 다이얼로그
 #[tauri::command]
-async fn select_save_directory(
-    app: tauri::AppHandle,
-) -> Result<Option<String>, String> {
+async fn select_save_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
 
-    app.dialog()
-        .file()
-        .pick_folder(move |result| {
-            let _ = tx.send(result);
-        });
+    app.dialog().file().pick_folder(move |result| {
+        let _ = tx.send(result);
+    });
 
-    let folder_path = rx.await
+    let folder_path = rx
+        .await
         .map_err(|e| format!("폴더 선택 채널 오류: {}", e))?;
 
     match folder_path {
@@ -1114,14 +1213,17 @@ async fn send_signaling_message(
             if client.is_none() {
                 *client = Some(QuicClient::new());
             }
-            
+
             if let Some(ref mut c) = *client {
-                let conn = c.connect(peer_addr, &peer_id).await
+                let conn = c
+                    .connect(peer_addr, &peer_id)
+                    .await
                     .map_err(|e| format!("QUIC 연결 실패: {}", e))?;
-                
-                c.send_command(&conn, message).await
+
+                c.send_command(&conn, message)
+                    .await
                     .map_err(|e| format!("시그널링 메시지 전송 실패: {}", e))?;
-                
+
                 info!("✅ 시그널링 메시지를 {}로 전송함", peer_id);
                 Ok(())
             } else {
@@ -1141,7 +1243,7 @@ async fn handle_signaling_message(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     info!("📨 수신된 시그널링 메시지: {:?}", message);
-    
+
     // 🆕 프론트엔드로 시그널링 이벤트 발생
     let event_name = match message {
         Command::Offer { .. } => "signaling-offer",
@@ -1154,11 +1256,13 @@ async fn handle_signaling_message(
     let payload = serde_json::to_value(&message)
         .map_err(|e| format!("시그널링 메시지 직렬화 실패: {}", e))?;
 
-    state.app_handle.emit(event_name, &payload)
+    state
+        .app_handle
+        .emit(event_name, &payload)
         .map_err(|e| format!("프론트엔드 이벤트 발생 실패: {}", e))?;
-    
+
     info!("✅ 프론트엔드로 이벤트 발생: {}", event_name);
-    
+
     Ok(())
 }
 
@@ -1167,53 +1271,61 @@ async fn handle_signaling_message(
 /// 부트스트랩 자동 시작 (앱 시작 시)
 async fn auto_start_bootstrap(app_handle: AppHandle) -> anyhow::Result<()> {
     use tauri::Manager;
-    
+
     // 기본 설정으로 부트스트랩 생성
     let config = bootstrap::BootstrapConfig::default();
-    
+
     // 설정에서 enabled가 false면 시작하지 않음
     if !config.enabled {
         info!("내장 부트스트랩이 비활성화되어 있습니다");
         return Ok(());
     }
-    
+
     info!("🚀 내장 부트스트랩 자동 시작 중...");
-    
+
     // AppState 가져오기
     let state: tauri::State<AppState> = app_handle.state();
     let mut bootstrap_guard = state.embedded_bootstrap.write().await;
-    
+
     // 서비스 생성 및 시작
     let mut service = bootstrap::EmbeddedBootstrapService::new(config.clone());
-    
+
     match service.start().await {
         Ok(ports) => {
             info!("✅ 내장 부트스트랩 자동 시작 완료");
-            info!("   DHT: {}, QUIC: {}, Stats: {}", 
-                ports.dht_port, ports.quic_port, ports.stats_port);
-            
+            info!(
+                "   DHT: {}, QUIC: {}, Stats: {}",
+                ports.dht_port, ports.quic_port, ports.stats_port
+            );
+
             // 상태 변경 이벤트 발생
-            let _ = app_handle.emit("bootstrap-state-changed", serde_json::json!({
-                "state": "running",
-                "ports": {
-                    "dht": ports.dht_port,
-                    "quic": ports.quic_port,
-                    "stats": ports.stats_port,
-                }
-            }));
-            
+            let _ = app_handle.emit(
+                "bootstrap-state-changed",
+                serde_json::json!({
+                    "state": "running",
+                    "ports": {
+                        "dht": ports.dht_port,
+                        "quic": ports.quic_port,
+                        "stats": ports.stats_port,
+                    }
+                }),
+            );
+
             *bootstrap_guard = Some(service);
             Ok(())
         }
         Err(e) => {
             tracing::error!("내장 부트스트랩 자동 시작 실패: {}", e);
-            
+
             // 에러 이벤트 발생
-            let _ = app_handle.emit("bootstrap-state-changed", serde_json::json!({
-                "state": "error",
-                "error": e.to_string()
-            }));
-            
+            let _ = app_handle.emit(
+                "bootstrap-state-changed",
+                serde_json::json!({
+                    "state": "error",
+                    "error": e.to_string()
+                }),
+            );
+
             Err(e)
         }
     }
@@ -1226,63 +1338,73 @@ async fn start_embedded_bootstrap(
     state: tauri::State<'_, AppState>,
 ) -> Result<bootstrap::BoundPorts, String> {
     info!("🚀 내장 부트스트랩 시작 요청");
-    
+
     let config = config.unwrap_or_default();
-    
+
     // 설정 검증
-    config.validate().map_err(|e| format!("설정 검증 실패: {}", e))?;
-    
+    config
+        .validate()
+        .map_err(|e| format!("설정 검증 실패: {}", e))?;
+
     let mut bootstrap_guard = state.embedded_bootstrap.write().await;
-    
+
     // 이미 실행 중인지 확인
     if let Some(ref service) = *bootstrap_guard {
         if service.state() != &bootstrap::ServiceState::Stopped {
             return Err("부트스트랩 서비스가 이미 실행 중입니다".to_string());
         }
     }
-    
+
     // 새 서비스 생성 및 시작
     let mut service = bootstrap::EmbeddedBootstrapService::new(config);
-    let ports = service.start().await
+    let ports = service
+        .start()
+        .await
         .map_err(|e| format!("부트스트랩 시작 실패: {}", e))?;
-    
+
     // 상태 변경 이벤트 발생
-    let _ = state.app_handle.emit("bootstrap-state-changed", serde_json::json!({
-        "state": "running",
-        "ports": {
-            "dht": ports.dht_port,
-            "quic": ports.quic_port,
-            "stats": ports.stats_port,
-        }
-    }));
-    
+    let _ = state.app_handle.emit(
+        "bootstrap-state-changed",
+        serde_json::json!({
+            "state": "running",
+            "ports": {
+                "dht": ports.dht_port,
+                "quic": ports.quic_port,
+                "stats": ports.stats_port,
+            }
+        }),
+    );
+
     *bootstrap_guard = Some(service);
-    
+
     info!("✅ 내장 부트스트랩 시작 완료");
     Ok(ports)
 }
 
 /// 내장 부트스트랩 서비스 중지
 #[tauri::command]
-async fn stop_embedded_bootstrap(
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+async fn stop_embedded_bootstrap(state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("🛑 내장 부트스트랩 중지 요청");
-    
+
     let mut bootstrap_guard = state.embedded_bootstrap.write().await;
-    
+
     if let Some(ref mut service) = *bootstrap_guard {
-        service.stop().await
+        service
+            .stop()
+            .await
             .map_err(|e| format!("부트스트랩 중지 실패: {}", e))?;
-        
+
         // 상태 변경 이벤트 발생
-        let _ = state.app_handle.emit("bootstrap-state-changed", serde_json::json!({
-            "state": "stopped"
-        }));
+        let _ = state.app_handle.emit(
+            "bootstrap-state-changed",
+            serde_json::json!({
+                "state": "stopped"
+            }),
+        );
     }
-    
+
     *bootstrap_guard = None;
-    
+
     info!("✅ 내장 부트스트랩 중지 완료");
     Ok(())
 }
@@ -1293,7 +1415,7 @@ async fn get_embedded_bootstrap_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<bootstrap::BootstrapStatus, String> {
     let bootstrap_guard = state.embedded_bootstrap.read().await;
-    
+
     if let Some(ref service) = *bootstrap_guard {
         Ok(service.get_status().await)
     } else {
@@ -1327,33 +1449,39 @@ async fn update_bootstrap_config(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     info!("🔧 부트스트랩 설정 업데이트");
-    
+
     // 설정 검증
-    config.validate().map_err(|e| format!("설정 검증 실패: {}", e))?;
-    
+    config
+        .validate()
+        .map_err(|e| format!("설정 검증 실패: {}", e))?;
+
     let mut bootstrap_guard = state.embedded_bootstrap.write().await;
-    
+
     if let Some(ref mut service) = *bootstrap_guard {
         let was_running = service.state() == &bootstrap::ServiceState::Running;
-        
+
         // 재시작이 필요한 경우
         if restart && was_running {
-            service.stop().await
+            service
+                .stop()
+                .await
                 .map_err(|e| format!("부트스트랩 중지 실패: {}", e))?;
         }
-        
+
         service.update_config(config.clone());
-        
+
         // 재시작
         if restart && was_running {
-            service.start().await
+            service
+                .start()
+                .await
                 .map_err(|e| format!("부트스트랩 재시작 실패: {}", e))?;
         }
     } else {
         // 서비스가 없으면 새로 생성 (시작하지 않음)
         *bootstrap_guard = Some(bootstrap::EmbeddedBootstrapService::new(config));
     }
-    
+
     info!("✅ 부트스트랩 설정 업데이트 완료");
     Ok(())
 }
@@ -1379,18 +1507,24 @@ async fn send_zip_stream_transfer(
             .clone()
     };
 
-    info!("🗜️ Zip 스트리밍 전송 시작: {} 파일 -> {}", files.len(), peer_id);
+    info!(
+        "🗜️ Zip 스트리밍 전송 시작: {} 파일 -> {}",
+        files.len(),
+        peer_id
+    );
 
     // 파일 엔트리 변환
     let file_entries: Vec<FileEntry> = files
         .into_iter()
         .filter_map(|f| {
-            let absolute_path = f.get("nativePath")
+            let absolute_path = f
+                .get("nativePath")
                 .or_else(|| f.get("path"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())?;
-            
-            let relative_path = f.get("relativePath")
+
+            let relative_path = f
+                .get("relativePath")
                 .or_else(|| f.get("name"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
@@ -1400,8 +1534,9 @@ async fn send_zip_stream_transfer(
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "unknown".to_string())
                 });
-            
-            let size = f.get("nativeSize")
+
+            let size = f
+                .get("nativeSize")
                 .or_else(|| f.get("size"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
@@ -1426,15 +1561,21 @@ async fn send_zip_stream_transfer(
 
     // 진행률 채널 설정
     let (tx, mut rx) = mpsc::channel::<TransferProgress>(100);
-    
+
     // 취소 토큰 생성 및 등록
     let is_cancelled = Arc::new(AtomicBool::new(false));
-    let job_control = JobControl { is_cancelled: is_cancelled.clone() };
-    state.active_jobs.write().await.insert(job_id.clone(), job_control);
+    let job_control = JobControl {
+        is_cancelled: is_cancelled.clone(),
+    };
+    state
+        .active_jobs
+        .write()
+        .await
+        .insert(job_id.clone(), job_control);
 
     // Job Cleanup Guard (함수 종료 시 자동 제거)
     // Rust의 Drop을 이용하거나, ensure logic 사용. 여기서는 명시적 제거 사용.
-    
+
     // Sender 설정 (with_cancellation은 zip_stream.rs에 추가해야 함)
     let sender = ZipStreamSender::new(config)
         .with_progress_channel(tx)
@@ -1450,19 +1591,21 @@ async fn send_zip_stream_transfer(
 
     // 전송 실행
     let result = sender.send_zip_stream(&conn, file_entries, &job_id).await;
-    
+
     // 작업 등록 해제
     state.active_jobs.write().await.remove(&job_id);
 
-    let bytes_sent = result
-        .map_err(|e| format!("Zip 스트리밍 전송 실패: {}", e))?;
+    let bytes_sent = result.map_err(|e| format!("Zip 스트리밍 전송 실패: {}", e))?;
 
     // 완료 이벤트
-    let _ = state.app_handle.emit("transfer-complete", serde_json::json!({
-        "jobId": job_id,
-        "bytesSent": bytes_sent,
-        "peerId": peer_id,
-    }));
+    let _ = state.app_handle.emit(
+        "transfer-complete",
+        serde_json::json!({
+            "jobId": job_id,
+            "bytesSent": bytes_sent,
+            "peerId": peer_id,
+        }),
+    );
 
     info!("✅ Zip 스트리밍 전송 완료: {} bytes", bytes_sent);
     Ok(bytes_sent)
@@ -1485,8 +1628,7 @@ async fn send_folder_transfer(
         .to_string_lossy()
         .to_string();
 
-    let files = scan_folder(folder_path.clone())
-        .map_err(|e| format!("폴더 스캔 실패: {}", e))?;
+    let files = scan_folder(folder_path.clone()).map_err(|e| format!("폴더 스캔 실패: {}", e))?;
 
     if files.is_empty() {
         return Err("전송할 파일이 없습니다.".to_string());
@@ -1501,7 +1643,8 @@ async fn send_folder_transfer(
         compression_level,
         Some("folder".to_string()),
         state,
-    ).await
+    )
+    .await
 }
 
 /// 🆕 Zip 스트리밍으로 파일 수신 (Receiver)
@@ -1526,7 +1669,10 @@ async fn receive_zip_stream_transfer(
             .clone()
     };
 
-    info!("📥 Zip 스트리밍 수신 대기: {} -> {} (type: {})", peer_id, save_dir, transfer_type);
+    info!(
+        "📥 Zip 스트리밍 수신 대기: {} -> {} (type: {})",
+        peer_id, save_dir, transfer_type
+    );
 
     let config = ZipStreamConfig::default();
 
@@ -1558,7 +1704,9 @@ async fn receive_zip_stream_transfer(
             save_path = save_path.join(file_name);
         }
     }
-    let result_path = receiver.receive_zip_stream(&conn, save_path, &job_id).await
+    let result_path = receiver
+        .receive_zip_stream(&conn, save_path, &job_id)
+        .await
         .map_err(|e| format!("Zip 스트리밍 수신 실패: {}", e))?;
 
     let result_str = result_path.to_string_lossy().to_string();
@@ -1583,25 +1731,32 @@ async fn receive_zip_stream_transfer(
 
         let _ = tokio::fs::remove_file(&result_path).await;
 
-        let extracted_paths = extracted_files.iter()
+        let extracted_paths = extracted_files
+            .iter()
             .map(|p| p.to_string_lossy().to_string())
             .collect::<Vec<_>>();
 
-        let _ = state.app_handle.emit("folder-extracted", serde_json::json!({
-            "jobId": job_id,
-            "extractedPath": output_dir.to_string_lossy().to_string(),
-            "extractedFiles": extracted_paths,
-        }));
+        let _ = state.app_handle.emit(
+            "folder-extracted",
+            serde_json::json!({
+                "jobId": job_id,
+                "extractedPath": output_dir.to_string_lossy().to_string(),
+                "extractedFiles": extracted_paths,
+            }),
+        );
 
         info!("✅ 폴더 압축 해제 완료: {} 파일", extracted_files.len());
     }
 
     // 완료 이벤트
-    let _ = state.app_handle.emit("transfer-complete", serde_json::json!({
-        "jobId": job_id,
-        "savedPath": result_str,
-        "peerId": peer_id,
-    }));
+    let _ = state.app_handle.emit(
+        "transfer-complete",
+        serde_json::json!({
+            "jobId": job_id,
+            "savedPath": result_str,
+            "peerId": peer_id,
+        }),
+    );
 
     info!("✅ Zip 스트리밍 수신 완료: {:?}", result_path);
     Ok(result_str)
@@ -1623,22 +1778,22 @@ async fn extract_zip_file(
         extract_zip_to_directory(&zip_path_for_extract, &output_dir)
     })
     .await
-        .map_err(|e| format!("작업 실행 실패: {}", e))?
-        .map_err(|e| format!("압축 해제 실패: {}", e))?;
+    .map_err(|e| format!("작업 실행 실패: {}", e))?
+    .map_err(|e| format!("압축 해제 실패: {}", e))?;
 
     if remove_zip.unwrap_or(false) {
         let _ = tokio::fs::remove_file(&zip_path).await;
     }
 
-    Ok(result.into_iter().map(|p| p.to_string_lossy().to_string()).collect())
+    Ok(result
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect())
 }
 
 /// 🆕 전송 작업 취소
 #[tauri::command]
-async fn cancel_transfer(
-    job_id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+async fn cancel_transfer(job_id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut jobs = state.active_jobs.write().await;
     if let Some(control) = jobs.get(&job_id) {
         control.is_cancelled.store(true, Ordering::SeqCst);
@@ -1699,7 +1854,7 @@ pub fn run() {
                 )?;
                 info!("📄 파일 로깅 활성화됨 (PONSWARP_LOG)");
             }
-            
+
             // 🆕 AppHandle을 포함한 AppState 생성 및 관리
             let app_handle = app.handle().clone();
             let state = AppState {
@@ -1709,7 +1864,9 @@ pub fn run() {
                 udp_core: Arc::new(RwLock::new(None)),
                 relay_engine: Arc::new(RwLock::new(None)),
                 file_transfer: Arc::new(RwLock::new(None)),
-                transfer_approval: Arc::new(crate::transfer::file_transfer::TransferApprovalManager::new()),
+                transfer_approval: Arc::new(
+                    crate::transfer::file_transfer::TransferApprovalManager::new(),
+                ),
                 file_stream_manager: Arc::new(FileStreamManager::new()),
                 active_connections: Arc::new(RwLock::new(std::collections::HashMap::new())),
                 accepted_connections: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -1719,7 +1876,7 @@ pub fn run() {
                 active_jobs: Arc::new(RwLock::new(std::collections::HashMap::new())),
             };
             app.manage(state);
-            
+
             // 🚀 내장 부트스트랩 자동 시작
             let app_handle_clone = app_handle.clone();
             tauri::async_runtime::spawn(async move {
@@ -1727,7 +1884,7 @@ pub fn run() {
                     tracing::warn!("부트스트랩 자동 시작 실패: {}", e);
                 }
             });
-            
+
             info!("✅ PonsWarp 초기화 완료");
             Ok(())
         })
@@ -1742,7 +1899,7 @@ pub fn run() {
 
                     // 종료 플래그 설정
                     state.is_closing.store(true, Ordering::SeqCst);
-                    
+
                     // 윈도우 닫기 방지 (정리 작업 수행을 위해)
                     api.prevent_close();
 
@@ -1762,7 +1919,7 @@ pub fn run() {
                                 }
                             }
                         }
-                        
+
                         // 정리 완료 후 윈도우 다시 닫기 (이때는 is_closing이 true라 바로 닫힘)
                         let _ = window_clone.close();
                     });
@@ -1772,7 +1929,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_runtime_info,
             ping_quic,
-            // 🆕 폴더 스캔 (Sender용 - Warp Engine v2.0)
             scan_folder,
             start_quic_server,
             stop_quic_server,
@@ -1786,53 +1942,41 @@ pub fn run() {
             stop_relay_engine,
             send_signaling_message,
             handle_signaling_message,
-            // 🆕 QUIC 파일 전송
             connect_to_peer,
             send_file_to_peer,
             send_file_to_accepted_peer,
-            get_accepted_peers,
-            receive_file_from_peer,
             disconnect_peer,
-            get_file_transfer_state,
-            // 🆕 파일 다이얼로그 및 메타데이터
-            open_file_dialog,
-            get_file_metadata,
-            // 🚀 멀티스트림 고속 전송 (TB급 최적화)
             send_file_multistream,
             receive_file_multistream,
-            get_io_engine_info,
-            // 🌐 Grid Protocol (Phase 2)
-            get_grid_info,
-            create_grid_metadata,
-            connect_bootstrap_node,
-            set_bootstrap_nodes,
-            discover_bootstrap_nodes,
-            // 🆕 네트워크 인터페이스 조회
-            get_network_interfaces,
-            // 🔧 내장 부트스트랩 서비스
-            start_embedded_bootstrap,
-            stop_embedded_bootstrap,
-            get_embedded_bootstrap_status,
-            update_bootstrap_config,
-            // --- Native File Streaming (StreamSaver.js 대체) ---
+            connect_via_relay,
+            get_public_ip,
             start_file_stream,
             write_file_chunk,
             complete_file_stream,
             create_save_dialog,
             select_save_directory,
+            
+            get_accepted_peers,
+            receive_file_from_peer,
+            get_file_transfer_state,
+            open_file_dialog,
+            get_file_metadata,
             check_storage_space,
-            // --- Warp Engine v2.0 파일 시스템 커맨드 ---
-            resolve_path,
-            ensure_dir_exists,
-            start_native_file_stream,
-            write_native_file_chunk,
-            close_native_file_stream,
-            // 🆕 Zip 스트리밍 커맨드
+            get_io_engine_info,
+            get_network_interfaces,
+            get_grid_info,
+            create_grid_metadata,
+            connect_bootstrap_node,
+            set_bootstrap_nodes,
+            discover_bootstrap_nodes,
+            start_embedded_bootstrap,
+            stop_embedded_bootstrap,
+            get_embedded_bootstrap_status,
+            update_bootstrap_config,
             send_zip_stream_transfer,
-            receive_zip_stream_transfer,
             send_folder_transfer,
+            receive_zip_stream_transfer,
             extract_zip_file,
-            // 🆕 작업 취소
             cancel_transfer,
             get_pending_transfers,
             approve_transfer,

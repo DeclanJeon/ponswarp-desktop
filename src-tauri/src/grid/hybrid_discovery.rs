@@ -82,11 +82,7 @@ impl HybridDiscovery {
     }
 
     /// DHT 핸들 설정
-    pub fn with_dht(
-        mut self,
-        handle: DhtHandle,
-        event_rx: mpsc::Receiver<DhtEvent>,
-    ) -> Self {
+    pub fn with_dht(mut self, handle: DhtHandle, event_rx: mpsc::Receiver<DhtEvent>) -> Self {
         self.dht_handle = Some(handle);
         self.dht_event_rx = Some(event_rx);
         self

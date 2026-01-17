@@ -99,8 +99,8 @@ impl GridMessage {
         W: AsyncWrite + Unpin,
     {
         // 1. bincode로 직렬화
-        let encoded = bincode::serialize(self)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let encoded =
+            bincode::serialize(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // 2. 길이 프리픽스 (Length-Prefixed) 방식 전송
         // [Length(4bytes LE)][Payload...]
@@ -125,7 +125,10 @@ impl GridMessage {
         if len > MAX_MESSAGE_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Message too large: {} bytes (max: {})", len, MAX_MESSAGE_SIZE),
+                format!(
+                    "Message too large: {} bytes (max: {})",
+                    len, MAX_MESSAGE_SIZE
+                ),
             ));
         }
 
@@ -166,7 +169,9 @@ impl GridMessage {
             protocol_version: PROTOCOL_VERSION,
             info_hash,
             peer_id,
-            extensions: extensions::FAST_EXTENSION | extensions::DHT | extensions::METADATA_EXCHANGE,
+            extensions: extensions::FAST_EXTENSION
+                | extensions::DHT
+                | extensions::METADATA_EXCHANGE,
         }
     }
 

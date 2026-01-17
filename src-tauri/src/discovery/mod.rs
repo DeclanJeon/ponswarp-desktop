@@ -1,5 +1,5 @@
-pub mod node_registry;
 pub mod mdns;
+pub mod node_registry;
 
-pub use node_registry::{NodeRegistry, PeerNode};
 pub use mdns::DiscoveryService;
+pub use node_registry::{NodeRegistry, PeerNode};
