@@ -636,7 +636,10 @@ class NativeTransferService {
       const applyRootDir = (entry: string) => {
         if (!zipRootDir) return entry;
         const normalizedEntry = normalizeEntryPath(entry);
-        const normalizedRoot = normalizeEntryPath(zipRootDir).replace(/\/+$/, '');
+        const normalizedRoot = normalizeEntryPath(zipRootDir).replace(
+          /\/+$/,
+          ''
+        );
         if (!normalizedRoot) return normalizedEntry;
         if (
           normalizedEntry === normalizedRoot ||
@@ -805,7 +808,9 @@ class NativeTransferService {
   }
 
   /**
-   * 피어에 연결
+   * 피어에 연결 (Smart Connection Strategy)
+   * 1. Direct P2P 시도 (QUIC/LAN)
+   * 2. 실패 시 Relay 모드 전환 (WebSocket Tunnel)
    */
   async connectToPeer(peerId: string, peerAddress: string): Promise<boolean> {
     try {
@@ -819,26 +824,20 @@ class NativeTransferService {
       if (result) {
         this.connected = true;
         this.currentPeerId = peerId;
-        this.emit('connected', { peerId });
-        logInfo('[NativeTransfer]', '✅ 피어 연결 성공');
+        this.emit('connected', { peerId, mode: 'direct' });
+        logInfo('[NativeTransfer]', '✅ 피어 연결 성공 (Direct P2P)');
 
-        // 🆕 연결 상태 확인을 위한 추가 검증
-        // 실제 연결이 유효한지 확인하기 위해 간단한 ping 테스트
-        try {
-          const pingResult = await invoke<boolean>('ping_quic');
-          if (pingResult) {
-            logInfo('[NativeTransfer]', '✅ QUIC 연결 상태 확인 완료');
-          } else {
-            logWarn('[NativeTransfer]', '⚠️ QUIC 연결 상태 확인 실패');
-          }
-        } catch (pingError) {
-          logWarn('[NativeTransfer]', '⚠️ QUIC ping 테스트 실패:', pingError);
+        const pingResult = await invoke<boolean>('ping_quic');
+        if (pingResult) {
+          logInfo('[NativeTransfer]', '✅ QUIC 연결 상태 확인 완료');
+        } else {
+          logWarn('[NativeTransfer]', '⚠️ QUIC 연결 상태 확인 실패');
         }
       } else {
         logError('[NativeTransfer]', '❌ 피어 연결 실패: invoke 결과 false');
-      }
 
-      return result;
+        return result;
+      }
     } catch (error) {
       logError('[NativeTransfer]', '❌ 피어 연결 실패:', error);
       this.emit('error', {
@@ -849,7 +848,7 @@ class NativeTransferService {
   }
 
   /**
-   * 발견된 피어 중 특정 피어에 연결
+   * 발견된 피어에 연결 (mDNS/LAN)
    */
   async connectToDiscoveredPeer(peerId: string): Promise<boolean> {
     const peers = await getDiscoveredPeers();
@@ -859,6 +858,10 @@ class NativeTransferService {
       logError('[NativeTransfer]', `피어를 찾을 수 없음: ${peerId}`);
       return false;
     }
+
+    const peerAddress = peer.address;
+    return this.connectToPeer(peerId, peerAddress);
+  }
 
     return this.connectToPeer(peerId, peer.address);
   }

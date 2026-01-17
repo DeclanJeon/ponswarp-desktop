@@ -653,10 +653,14 @@ export class SwarmManager {
    * [14-17] Data Length (u32)
    * [18-21] CRC32 Checksum (u32)
    */
-  private encodePacket(data: ArrayBuffer, fileIndex: number, offset: number): ArrayBuffer {
+  private encodePacket(
+    data: ArrayBuffer,
+    fileIndex: number,
+    offset: number
+  ): ArrayBuffer {
     const dataArray = new Uint8Array(data);
     const packetLength = HEADER_SIZE + dataArray.length;
-    
+
     // Allocate new buffer for header + data
     const buffer = new ArrayBuffer(packetLength);
     const view = new DataView(buffer);
@@ -1342,8 +1346,14 @@ export class SwarmManager {
     this.completedPeerCount = 0;
     this.useParallelEncryption = useParallelEncryption;
 
-    // TURN 설정 가져오기
-    await this.fetchTurnConfig(roomId);
+    // TURN 설정 가져오기 (캐싱된 값 사용)
+    if (signalingService.isConnected()) {
+      this.iceServers = signalingService.getCachedIceServers();
+      logInfo('[SwarmManager]', 'Using cached ICE servers:', this.iceServers);
+    } else {
+      // 연결이 안되어 있으면 기존 fetchTurnConfig 로직 사용
+      await this.fetchTurnConfig(roomId);
+    }
 
     // 시그널링 연결
     await signalingService.connect();
@@ -1490,7 +1500,8 @@ export class SwarmManager {
       console.log('[SwarmManager] 📊 [DEBUG] Processing batch from worker:', {
         chunkCount: chunks.length,
         totalBatchSize: chunks.reduce(
-          (sum: number, chunk: any) => sum + chunk.data?.byteLength || chunk.byteLength || 0,
+          (sum: number, chunk: any) =>
+            sum + chunk.data?.byteLength || chunk.byteLength || 0,
           0
         ),
         connectedPeers: connectedPeers.length,
@@ -1527,11 +1538,14 @@ export class SwarmManager {
       for (const chunkInfo of chunks) {
         // chunkInfo = { fileIndex, offset, data, size } (from new worker)
         // OR chunk = ArrayBuffer (legacy compatibility)
-        
+
         let packet: ArrayBuffer;
-        
+
         // Check if this is the new format with fileIndex
-        if (chunkInfo.fileIndex !== undefined && chunkInfo.data instanceof ArrayBuffer) {
+        if (
+          chunkInfo.fileIndex !== undefined &&
+          chunkInfo.data instanceof ArrayBuffer
+        ) {
           // 🚀 [Warp Protocol] Encode packet with FileIndex header
           packet = this.encodePacket(
             chunkInfo.data,

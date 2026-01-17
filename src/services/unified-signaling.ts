@@ -89,6 +89,11 @@ export class UnifiedSignalingService {
   // 이벤트 이미터
   private eventEmitter: SimpleEventEmitter;
 
+  // [NEW] TURN 서버 설정을 캐싱할 변수 추가
+  private turnConfigCache: RTCIceServer[] = [
+    { urls: 'stun:stun.l.google.com:19302' }, // Default Fallback
+  ];
+
   constructor() {
     this.eventEmitter = new SimpleEventEmitter();
   }
@@ -116,11 +121,40 @@ export class UnifiedSignalingService {
       try {
         this.ws = new WebSocket(WS_URL);
 
-        this.ws.onopen = () => {
+        this.ws.onopen = async () => {
           console.log('[UnifiedSignaling] ✅ WebSocket Connected');
           this.isConnecting = false;
           this.reconnectAttempts = 0;
           this.eventEmitter.emit('connected', this.myPeerId);
+
+          // [NEW] 연결 즉시 TURN 설정 요청 (Pre-fetching)
+          // roomId 'global'은 초기 설정을 위한 임의의 식별자입니다.
+          try {
+            console.log('[UnifiedSignaling] Pre-fetching TURN config...');
+            const config = await this.requestTurnConfig('global-init');
+            if (
+              config.success &&
+              config.data &&
+              config.data.iceServers.length > 0
+            ) {
+              // 기존 구글 STUN과 병합 (중복 제거 로직은 생략)
+              this.turnConfigCache = [
+                ...config.data.iceServers,
+                { urls: 'stun:stun.l.google.com:19302' },
+              ];
+              console.log(
+                '[UnifiedSignaling] TURN config cached:',
+                this.turnConfigCache.length,
+                'servers'
+              );
+            }
+          } catch (e) {
+            console.warn(
+              '[UnifiedSignaling] Initial TURN fetch failed (using default STUN):',
+              e
+            );
+          }
+
           resolve();
         };
 
@@ -366,6 +400,14 @@ export class UnifiedSignalingService {
   }
 
   // ======================= PUBLIC API =======================
+
+  /**
+   * 캐싱된 최신 ICE 서버 목록을 반환
+   * SwarmManager나 WebRTC Service에서 호출합니다.
+   */
+  public getCachedIceServers(): RTCIceServer[] {
+    return [...this.turnConfigCache];
+  }
 
   public on(event: string, handler: SignalHandler): void {
     this.eventEmitter.on(event, handler);

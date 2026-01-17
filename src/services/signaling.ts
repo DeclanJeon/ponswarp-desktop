@@ -50,6 +50,9 @@ class SignalingService {
   private maxReconnectAttempts = 5;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connectionPromise: Promise<void> | null = null;
+  private turnConfigCache: RTCIceServer[] = [
+    { urls: 'stun:stun.l.google.com:19302' },
+  ];
 
   public async connect(): Promise<void> {
     if (this.ws?.readyState === WebSocket.OPEN) {
@@ -69,11 +72,33 @@ class SignalingService {
       try {
         this.ws = new WebSocket(WS_URL);
 
-        this.ws.onopen = () => {
+        this.ws.onopen = async () => {
           console.log('[Signaling] ✅ WebSocket Connected');
           this.isConnecting = false;
           this.reconnectAttempts = 0;
           this.emit('connected', 'native-ws-client');
+
+          try {
+            const config = await this.requestTurnConfig('global-init');
+            if (
+              config.success &&
+              config.data &&
+              config.data.iceServers.length > 0
+            ) {
+              this.turnConfigCache = config.data.iceServers;
+              console.log(
+                '[Signaling] TURN config cached:',
+                this.turnConfigCache.length,
+                'servers'
+              );
+            }
+          } catch (e) {
+            console.warn(
+              '[Signaling] Initial TURN fetch failed (using default STUN):',
+              e
+            );
+          }
+
           resolve();
         };
 
