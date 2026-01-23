@@ -12,8 +12,8 @@ import { WasmReorderingBuffer } from '../services/wasmReorderingBuffer';
 
 // 설정값
 const HIGH_WATER_MARK = 16 * 1024 * 1024; // 16MB (이 이상 쌓이면 PAUSE 요청)
-const LOW_WATER_MARK = 4 * 1024 * 1024;   // 4MB (이 밑으로 떨어지면 RESUME 요청)
-const BATCH_THRESHOLD = 8 * 1024 * 1024;  // 8MB (배치 처리 임계값)
+const LOW_WATER_MARK = 4 * 1024 * 1024; // 4MB (이 밑으로 떨어지면 RESUME 요청)
+const BATCH_THRESHOLD = 8 * 1024 * 1024; // 8MB (배치 처리 임계값)
 
 // 상태 타입 정의
 interface WorkerStatus {
@@ -43,26 +43,30 @@ let currentBatchSize = 0;
 /**
  * 초기화 함수
  */
-async function init(handle: FileSystemFileHandle, cb: (status: WorkerStatus) => void, fileSize: number): Promise<void> {
+async function init(
+  handle: FileSystemFileHandle,
+  cb: (status: WorkerStatus) => void,
+  fileSize: number
+): Promise<void> {
   try {
     fileHandle = handle;
     writable = await fileHandle.createWritable({ keepExistingData: false });
     statusCallback = cb;
     totalSize = fileSize;
-    
+
     // WASM 초기화
     await initPonsCore();
     reorderingBuffer = new WasmReorderingBuffer();
     await reorderingBuffer.initialize(0);
-    
+
     isInitialized = true;
-    
+
     statusCallback?.({
       type: 'INITIALIZED',
       loaded: 0,
-      queueSize: 0
+      queueSize: 0,
     });
-    
+
     console.log('[Worker] Initialized & WASM Ready');
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
@@ -70,7 +74,7 @@ async function init(handle: FileSystemFileHandle, cb: (status: WorkerStatus) => 
     statusCallback?.({
       type: 'ERROR',
       loaded: 0,
-      error: errorMsg
+      error: errorMsg,
     });
     throw error;
   }
@@ -93,16 +97,21 @@ async function pushChunk(chunk: Uint8Array, offset: number): Promise<void> {
     statusCallback?.({
       type: 'PAUSE',
       loaded: processedOffset,
-      queueSize: currentQueueSize
+      queueSize: currentQueueSize,
     });
-    console.warn(`[Worker] 🛑 Backpressure triggered (Queue: ${(currentQueueSize / 1024 / 1024).toFixed(2)}MB)`);
+    console.warn(
+      `[Worker] 🛑 Backpressure triggered (Queue: ${(currentQueueSize / 1024 / 1024).toFixed(2)}MB)`
+    );
   }
 
   try {
     // 3. 순서 정렬 버퍼에 추가
     if (reorderingBuffer) {
       const chunksToWrite = reorderingBuffer.push(
-        chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength) as ArrayBuffer,
+        chunk.buffer.slice(
+          chunk.byteOffset,
+          chunk.byteOffset + chunk.byteLength
+        ) as ArrayBuffer,
         offset
       );
 
@@ -124,7 +133,7 @@ async function pushChunk(chunk: Uint8Array, offset: number): Promise<void> {
     statusCallback?.({
       type: 'ERROR',
       loaded: processedOffset,
-      error: errorMsg
+      error: errorMsg,
     });
     throw err;
   } finally {
@@ -137,16 +146,16 @@ async function pushChunk(chunk: Uint8Array, offset: number): Promise<void> {
       statusCallback?.({
         type: 'RESUME',
         loaded: processedOffset,
-        queueSize: currentQueueSize
+        queueSize: currentQueueSize,
       });
       console.log('[Worker] ▶️ Resuming (Queue drained)');
     }
-    
+
     // 8. 진행률 보고 (쓰로틀링 적용)
     statusCallback?.({
       type: 'PROGRESS',
       loaded: processedOffset,
-      queueSize: currentQueueSize
+      queueSize: currentQueueSize,
     });
   }
 }
@@ -170,7 +179,7 @@ async function flushWriteBuffer(): Promise<void> {
     await writable.write({
       type: 'write',
       position: processedOffset,
-      data: mergedBuffer
+      data: mergedBuffer,
     });
 
     // 상태 업데이트
@@ -178,7 +187,9 @@ async function flushWriteBuffer(): Promise<void> {
     writeBuffer = [];
     currentBatchSize = 0;
 
-    console.debug(`[Worker] Flushed ${formatBytes(offset)} to disk, total: ${formatBytes(processedOffset)}`);
+    console.debug(
+      `[Worker] Flushed ${formatBytes(offset)} to disk, total: ${formatBytes(processedOffset)}`
+    );
   } catch (error) {
     console.error('[Worker] Flush error:', error);
     throw error;
@@ -220,19 +231,19 @@ async function finalize(): Promise<void> {
 async function cleanup(): Promise<void> {
   try {
     await finalize();
-    
+
     if (writable) {
       await writable.abort();
       writable = null;
     }
-    
+
     fileHandle = null;
     isInitialized = false;
     currentQueueSize = 0;
     isPaused = false;
     processedOffset = 0;
     totalSize = 0;
-    
+
     console.log('[Worker] Cleanup complete');
   } catch (error) {
     console.error('[Worker] Cleanup error:', error);
@@ -254,7 +265,7 @@ function getStatus(): {
     isPaused,
     processedOffset,
     totalSize,
-    isInitialized
+    isInitialized,
   };
 }
 
@@ -271,41 +282,41 @@ function formatBytes(bytes: number, decimals = 2): string {
 // Worker 메시지 핸들러
 self.onmessage = async (event: MessageEvent) => {
   const { type, payload, id } = event.data;
-  
+
   try {
     let result;
-    
+
     switch (type) {
       case 'init':
         result = await init(payload.handle, payload.callback, payload.fileSize);
         break;
-        
+
       case 'pushChunk':
         result = await pushChunk(payload.chunk, payload.offset);
         break;
-        
+
       case 'finalize':
         result = await finalize();
         break;
-        
+
       case 'cleanup':
         result = await cleanup();
         break;
-        
+
       case 'getStatus':
         result = getStatus();
         break;
-        
+
       default:
         throw new Error(`Unknown message type: ${type}`);
     }
-    
+
     // 성공 응답
     self.postMessage({
       type: 'response',
       id,
       success: true,
-      result
+      result,
     });
   } catch (error) {
     // 에러 응답
@@ -313,7 +324,7 @@ self.onmessage = async (event: MessageEvent) => {
       type: 'response',
       id,
       success: false,
-      error: error instanceof Error ? error.message : String(error)
+      error: error instanceof Error ? error.message : String(error),
     });
   }
 };

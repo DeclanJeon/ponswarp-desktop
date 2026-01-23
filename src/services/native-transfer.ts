@@ -30,7 +30,6 @@ import { initWasmCore, Zip64Stream } from './wasmCore';
 type EventHandler = (data: unknown) => void;
 
 // 🆕 파일 읽기 청크 크기 (WASM 메모리 효율 고려)
-const FILE_READ_CHUNK_SIZE = 64 * 1024;
 
 // 🆕 파일 전송 작업을 위한 인터페이스
 interface TransferJob {
@@ -1410,6 +1409,7 @@ class NativeTransferService {
       this.emit('status', 'RECEIVING');
 
       // 🆕 다중 파일 수신 루프
+      // eslint-disable-next-line no-constant-condition
       while (true) {
         const jobId = `${baseJobId}-${fileIndex}`;
 

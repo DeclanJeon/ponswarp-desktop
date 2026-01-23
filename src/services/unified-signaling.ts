@@ -11,16 +11,16 @@ import { SIGNALING_SERVER_URL } from '../utils/constants';
 
 // 브라우저 호환성을 위한 간단한 EventEmitter 구현
 class SimpleEventEmitter {
-  private events: Record<string, Function[]> = {};
+  private events: Record<string, ((...args: any[]) => void)[]> = {};
 
-  on(event: string, listener: Function) {
+  on(event: string, listener: (...args: any[]) => void) {
     if (!this.events[event]) {
       this.events[event] = [];
     }
     this.events[event].push(listener);
   }
 
-  off(event: string, listener: Function) {
+  off(event: string, listener: (...args: any[]) => void) {
     if (!this.events[event]) return;
     this.events[event] = this.events[event].filter(l => l !== listener);
   }
@@ -263,7 +263,7 @@ export class UnifiedSignalingService {
         });
         break;
 
-      case 'Offer':
+      case 'Offer': {
         // payload: { from: "...", sdp: "..." }
         this.targetPeerId = payload.from; // Offer를 보낸 사람이 나의 타겟
         // 🚨 [핵심 수정] SDP 문자열을 객체로 파싱
@@ -276,8 +276,9 @@ export class UnifiedSignalingService {
           from: payload.from,
         });
         break;
+      }
 
-      case 'Answer':
+      case 'Answer': {
         // 🚨 [핵심 수정] SDP 문자열을 객체로 파싱
         const answerData =
           typeof payload.sdp === 'string'
@@ -288,8 +289,9 @@ export class UnifiedSignalingService {
           from: payload.from,
         });
         break;
+      }
 
-      case 'IceCandidate':
+      case 'IceCandidate': {
         // 🚨 [핵심 수정] ICE 후보 문자열을 객체로 파싱
         const candidateData =
           typeof payload.candidate === 'string'
@@ -300,6 +302,7 @@ export class UnifiedSignalingService {
           from: payload.from,
         });
         break;
+      }
 
       case 'Error':
         console.error('[UnifiedSignaling] Server Error:', payload.message);

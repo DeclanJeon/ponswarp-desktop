@@ -51,7 +51,6 @@ export class SinglePeerConnection {
   public connected: boolean = false;
   public ready: boolean = false;
 
-  // @ts-ignore
   public pc: SimplePeer.Instance | null = null;
   private destroyed: boolean = false;
   private drainEmitted: boolean = false;
@@ -118,9 +117,7 @@ export class SinglePeerConnection {
 
     // binaryType 강제 설정
     const forceArrayBuffer = () => {
-      // @ts-ignore
       if (this.pc?._channel && this.pc._channel.binaryType !== 'arraybuffer') {
-        // @ts-ignore
         this.pc._channel.binaryType = 'arraybuffer';
       }
     };
@@ -163,7 +160,6 @@ export class SinglePeerConnection {
   }
 
   private setupChannelEvents(): void {
-    // @ts-ignore
     const channel = this.pc?._channel as RTCDataChannel;
     if (!channel) return;
 
@@ -199,7 +195,6 @@ export class SinglePeerConnection {
       return;
     }
 
-    // @ts-ignore
     const channel = this.pc._channel as RTCDataChannel;
     if (!channel || channel.readyState !== 'open') {
       return;
@@ -213,7 +208,6 @@ export class SinglePeerConnection {
    */
   public getBufferedAmount(): number {
     if (!this.pc || this.destroyed) return 0;
-    // @ts-ignore
     const channel = this.pc._channel as RTCDataChannel;
     return channel?.bufferedAmount ?? 0;
   }

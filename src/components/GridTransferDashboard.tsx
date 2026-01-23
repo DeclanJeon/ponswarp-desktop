@@ -8,7 +8,7 @@ import React, { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { GridVisualizer } from './GridVisualizer';
 import { SwarmStatus, SwarmState, PeerInfo } from './SwarmStatus';
-import { Settings, Play, Pause, RefreshCw } from 'lucide-react';
+import { Settings } from 'lucide-react';
 
 interface GridStateUpdate {
   job_id: string;
@@ -38,7 +38,7 @@ export const GridTransferDashboard: React.FC<GridTransferDashboardProps> = ({
 }) => {
   const [swarmState, setSwarmState] = useState<SwarmState | null>(null);
   const [isActive, setIsActive] = useState(false);
-  const [pendingPieces, setPendingPieces] = useState<number[]>([]);
+  const [pendingPieces] = useState<number[]>([]);
 
   useEffect(() => {
     // Grid 상태 업데이트 리스너

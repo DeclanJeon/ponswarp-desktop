@@ -182,7 +182,7 @@ export class DirectFileWriter {
     );
 
     // FSA 지원 여부 확인
-    // @ts-expect-error
+    // @ts-expect-error: showSaveFilePicker is not yet in standard lib
     const hasFileSystemAccess = !!window.showSaveFilePicker;
 
     // 1. File System Access API (Native) 최우선 시도
@@ -495,7 +495,7 @@ export class DirectFileWriter {
     try {
       logDebug('[DirectFileWriter]', 'Calling window.showSaveFilePicker...');
 
-      // @ts-expect-error - showSaveFilePicker may not be available in all browsers
+      // @ts-expect-error: window.showSaveFilePicker is experimental
       const handle = await window.showSaveFilePicker(pickerOptions);
       logDebug(
         '[DirectFileWriter]',

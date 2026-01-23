@@ -6,7 +6,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { logInfo, logError, logWarn } from '../utils/logger';
+import { logInfo, logError } from '../utils/logger';
 
 export interface BootstrapConfig {
   enabled: boolean;

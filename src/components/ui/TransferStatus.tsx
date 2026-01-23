@@ -1,15 +1,6 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import {
-  CheckCircle,
-  XCircle,
-  FileText,
-  ArrowUp,
-  ArrowDown,
-  Clock,
-  Zap,
-  HardDrive,
-} from 'lucide-react';
+import { CheckCircle, XCircle, ArrowUp, ArrowDown, Clock } from 'lucide-react';
 import { formatBytes } from '../../utils/fileUtils';
 
 interface TransferStatusProps {

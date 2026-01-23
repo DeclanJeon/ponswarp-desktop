@@ -6,26 +6,24 @@ console.log(
 );
 console.log('[SenderView] 🪲 [DEBUG] - Adding responsive layout improvements');
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   Upload,
   Folder,
   File as FileIcon,
   CheckCircle,
-  Copy,
   Check,
   Loader2,
   FilePlus,
   AlertTriangle,
   Users,
-  Zap,
 } from 'lucide-react';
 import { SwarmManager, MAX_DIRECT_PEERS } from '../services/swarmManager';
 import { createManifest, formatBytes } from '../utils/fileUtils';
 import { scanFiles, processInputFiles } from '../utils/fileScanner';
 import { motion, AnimatePresence } from 'framer-motion';
-import { AppMode, TransferManifest } from '../types/types';
+import { TransferManifest } from '../types/types';
 import { useTransferStore } from '../store/transferStore';
 import { nativeTransferService } from '../services/native-transfer';
 import { isWebRTCSupported } from '../services/singlePeerConnection';
@@ -38,7 +36,7 @@ interface SenderViewProps {
 }
 
 const SenderView: React.FC<SenderViewProps> = () => {
-  const { setStatus: setGlobalStatus, useNativeTransfer } = useTransferStore();
+  const { useNativeTransfer } = useTransferStore();
 
   // 🆕 Native QUIC 전송 모드 여부
   const isNativeMode = useNativeTransfer || !isWebRTCSupported();
@@ -62,6 +60,11 @@ const SenderView: React.FC<SenderViewProps> = () => {
     bytesTransferred: 0,
     totalBytes: 0,
   });
+
+  const statusRef = useRef(status);
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   // 🚀 [Multi-Receiver] 피어 상태 추적
   const [connectedPeers, setConnectedPeers] = useState<string[]>([]);
@@ -156,7 +159,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
             '[SenderView] Connection lost detected - may be normal after transfer completion'
           );
           // 이미 DONE 상태이면 오류 표시하지 않음
-          if (status === 'DONE') {
+          if (statusRef.current === 'DONE') {
             console.log(
               '[SenderView] Already in DONE status, ignoring connection lost error'
             );
@@ -190,7 +193,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
       nativeTransferService.on('connection-lost', (data: any) => {
         console.log('[SenderView] Connection lost event received:', data);
         // 이미 DONE 상태이면 아무것도 하지 않음
-        if (status === 'DONE') {
+        if (statusRef.current === 'DONE') {
           console.log(
             '[SenderView] Already in DONE status, ignoring connection lost'
           );
@@ -450,7 +453,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
       swarmManager.cleanup();
       swarmManager.removeAllListeners();
     };
-  }, []);
+  }, [isNativeMode]);
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
@@ -649,7 +652,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
           // Tauri API를 통해 OS에 맞는 절대 경로 생성
           const fullPath = await join(folderPath, item.path);
 
-          let size = item.size || 0;
+          const size = item.size || 0;
           const name = item.name || item.path.split(/[\\/]/).pop() || 'unknown';
 
           // 🆕 [FIX] 더미 File 객체 생성 (크기 정보 포함)
@@ -1317,7 +1320,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
                   </p>
                   <p>
                     Keep this window open. Transfer will start automatically
-                    when they click "Start Download".
+                    when they click &quot;Start Download&quot;.
                   </p>
                 </div>
               </div>

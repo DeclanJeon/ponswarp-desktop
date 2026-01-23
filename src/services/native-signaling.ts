@@ -15,11 +15,6 @@ import { isNative, getDiscoveredPeers, DiscoveredPeer } from '../utils/tauri';
 
 type MessageHandler = (data: unknown) => void;
 
-interface NativeSignalingConfig {
-  nodeId: string;
-  quicPort: number;
-}
-
 class NativeSignalingService {
   private handlers: Map<string, MessageHandler[]> = new Map();
   private nodeId: string | null = null;

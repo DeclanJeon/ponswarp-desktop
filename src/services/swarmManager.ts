@@ -24,7 +24,6 @@ import { getSenderWorkerV1 } from './workerFactory';
 import { TransferManifest } from '../types/types';
 import { logInfo, logError, logDebug, logWarn } from '../utils/logger';
 import {
-  HIGH_WATER_MARK,
   HEADER_SIZE,
   BATCH_SIZE_INITIAL,
   CHUNK_SIZE_MAX,
@@ -36,7 +35,6 @@ import { EncryptionWorkerPool, ChunkProcessedPayload } from './workerPool';
 const BUFFER_LOW_THRESHOLD = 1 * 1024 * 1024; // 1MB (Low Water Mark)
 const BUFFER_HIGH_THRESHOLD = 4 * 1024 * 1024; // 4MB (High Water Mark)
 import { CryptoService } from './cryptoService';
-import { isNative } from '../utils/tauri';
 
 // 핵심 안전 상수: 절대 변경 금지
 export const MAX_DIRECT_PEERS = 3;
@@ -635,7 +633,7 @@ export class SwarmManager {
     return canRequest;
   }
 
-  private handleDrain(peerId: string): void {
+  private handleDrain(_peerId: string): void {
     // 글로벌 backpressure 재평가
     if (this.isTransferring && this.canRequestMoreChunks()) {
       this.requestMoreChunks();

@@ -1,6 +1,6 @@
 /**
  * Transfer Controller
- * 
+ *
  * Main Thread에서 WebRTC 데이터 수신을 제어하고 Backpressure를 관리합니다.
  * - Credit-based Flow Control 구현
  * - Worker 상태 모니터링
@@ -8,7 +8,7 @@
  */
 
 import type { Instance as SimplePeerInstance } from 'simple-peer';
-import { logInfo, logWarn, logError, logDebug } from '../utils/logger';
+import { logInfo, logWarn, logError } from '../utils/logger';
 import { useTransferStore } from '../store/transferStore';
 
 // Worker 타입 정의
@@ -47,27 +47,32 @@ export class TransferController {
   private isPaused = false;
   private pendingQueue: DataChunk[] = [];
   private messageId = 0;
-  private pendingMessages = new Map<string, {
-    resolve: (value: any) => void;
-    reject: (reason: any) => void;
-    timeout: NodeJS.Timeout;
-  }>();
-  
+  private pendingMessages = new Map<
+    string,
+    {
+      resolve: (value: any) => void;
+      reject: (reason: any) => void;
+      timeout: NodeJS.Timeout;
+    }
+  >();
+
   // 상태 추적
   private totalReceived = 0;
   private totalProcessed = 0;
   private startTime = 0;
   private lastProgressReport = 0;
   private readonly PROGRESS_THROTTLE_MS = 200;
-  
+
   // Store 참조
   private store: ReturnType<typeof useTransferStore.getState>;
-  
+
   // 콜백
-  private onProgressCallback: ((progress: number, speed: number) => void) | null = null;
+  private onProgressCallback:
+    | ((progress: number, speed: number) => void)
+    | null = null;
   private onCompleteCallback: ((totalBytes: number) => void) | null = null;
   private onErrorCallback: ((error: string) => void) | null = null;
-  
+
   // 설정
   private readonly MAX_PENDING_QUEUE_SIZE = 500; // 최대 대기 큐 크기
   private readonly WORKER_TIMEOUT_MS = 30000; // Worker 응답 타임아웃
@@ -75,7 +80,7 @@ export class TransferController {
   constructor(peer: SimplePeerInstance) {
     this.peer = peer;
     this.setupWorker();
-    
+
     // Store에서 상태 가져오기
     this.store = useTransferStore.getState();
   }
@@ -91,7 +96,7 @@ export class TransferController {
       );
 
       this.worker.onmessage = this.handleWorkerMessage.bind(this);
-      this.worker.onerror = (error) => {
+      this.worker.onerror = error => {
         logError('[TransferController]', 'Worker error:', error);
         this.onErrorCallback?.(`Worker error: ${error.message}`);
       };
@@ -108,7 +113,7 @@ export class TransferController {
    */
   private handleWorkerMessage(event: MessageEvent<WorkerResponse>): void {
     const { id, success, result, error } = event.data;
-    
+
     const pending = this.pendingMessages.get(id);
     if (!pending) {
       logWarn('[TransferController]', `Unknown message ID: ${id}`);
@@ -135,7 +140,7 @@ export class TransferController {
     }
 
     const id = `msg_${++this.messageId}`;
-    
+
     return new Promise<T>((resolve, reject) => {
       // 타임아웃 설정
       const timeout = setTimeout(() => {
@@ -154,7 +159,10 @@ export class TransferController {
   /**
    * 파일 수신 시작
    */
-  public async startReceiving(fileName: string, fileSize: number): Promise<void> {
+  public async startReceiving(
+    fileName: string,
+    fileSize: number
+  ): Promise<void> {
     if (!this.worker) {
       throw new Error('Worker not initialized');
     }
@@ -168,7 +176,7 @@ export class TransferController {
       await this.sendToWorker('init', {
         handle: fileHandle,
         callback: this.handleWorkerStatus.bind(this),
-        fileSize
+        fileSize,
       });
 
       // WebRTC 데이터 수신 이벤트 연결
@@ -177,7 +185,10 @@ export class TransferController {
       // 시작 시간 기록
       this.startTime = Date.now();
 
-      logInfo('[TransferController]', `Started receiving file: ${fileName} (${fileSize} bytes)`);
+      logInfo(
+        '[TransferController]',
+        `Started receiving file: ${fileName} (${fileSize} bytes)`
+      );
     } catch (error) {
       logError('[TransferController]', 'Failed to start receiving:', error);
       this.onErrorCallback?.(`Failed to start receiving: ${error}`);
@@ -197,9 +208,12 @@ export class TransferController {
         if (status.queueSize !== undefined) {
           this.store.updateBackpressureQueue(status.queueSize);
         }
-        logWarn('[TransferController]', `Pausing reception due to backpressure (queue: ${status.queueSize} bytes)`);
+        logWarn(
+          '[TransferController]',
+          `Pausing reception due to backpressure (queue: ${status.queueSize} bytes)`
+        );
         break;
-        
+
       case 'RESUME':
         this.isPaused = false;
         // 🚀 [Backpressure] Store 상태 업데이트
@@ -207,10 +221,13 @@ export class TransferController {
         if (status.queueSize !== undefined) {
           this.store.updateBackpressureQueue(status.queueSize);
         }
-        logInfo('[TransferController]', `Resuming reception (queue: ${status.queueSize} bytes)`);
+        logInfo(
+          '[TransferController]',
+          `Resuming reception (queue: ${status.queueSize} bytes)`
+        );
         this.processPendingQueue();
         break;
-        
+
       case 'PROGRESS':
         this.totalProcessed = status.loaded;
         // 🚀 [Backpressure] Store 상태 업데이트
@@ -219,12 +236,12 @@ export class TransferController {
         }
         this.reportProgress();
         break;
-        
+
       case 'ERROR':
         logError('[TransferController]', `Worker error: ${status.error}`);
         this.onErrorCallback?.(status.error || 'Unknown worker error');
         break;
-        
+
       case 'INITIALIZED':
         logInfo('[TransferController]', 'Worker initialized successfully');
         // 🚀 [Backpressure] Water Mark 설정
@@ -238,23 +255,26 @@ export class TransferController {
    */
   private handleIncomingData(data: Uint8Array): void {
     this.totalReceived += data.byteLength;
-    
+
     // 데이터가 오면 무조건 받지만, Worker가 바쁘면 메모리에 쌓아둠
     if (this.isPaused) {
       // Worker가 꽉 찼음. 로컬 큐에 저장
       this.pendingQueue.push({
         data,
         offset: this.totalReceived - data.byteLength,
-        timestamp: Date.now()
+        timestamp: Date.now(),
       });
-      
+
       // 🚀 [Backpressure] Store 상태 업데이트
       this.store.updateBackpressureQueue(this.pendingQueue.length * 64 * 1024); // 추정 큐 크기
-      
+
       // 안전장치: 로컬 큐가 너무 커지면 경고
       if (this.pendingQueue.length > this.MAX_PENDING_QUEUE_SIZE) {
-        logWarn('[TransferController]', `Local queue is getting large (${this.pendingQueue.length} chunks)`);
-        
+        logWarn(
+          '[TransferController]',
+          `Local queue is getting large (${this.pendingQueue.length} chunks)`
+        );
+
         // 상대방에게 "전송 중단 요청" 시그널링 전송 로직 필요
         // this.signalingService.send('congestion-control', { action: 'pause' });
       }
@@ -262,9 +282,13 @@ export class TransferController {
       // Worker에 바로 전달
       this.sendToWorker('pushChunk', {
         chunk: data,
-        offset: this.totalReceived - data.byteLength
+        offset: this.totalReceived - data.byteLength,
       }).catch(error => {
-        logError('[TransferController]', 'Failed to send chunk to worker:', error);
+        logError(
+          '[TransferController]',
+          'Failed to send chunk to worker:',
+          error
+        );
         this.onErrorCallback?.(`Failed to process chunk: ${error}`);
       });
     }
@@ -281,10 +305,14 @@ export class TransferController {
       try {
         await this.sendToWorker('pushChunk', {
           chunk: chunk.data,
-          offset: chunk.offset
+          offset: chunk.offset,
         });
       } catch (error) {
-        logError('[TransferController]', 'Failed to process pending chunk:', error);
+        logError(
+          '[TransferController]',
+          'Failed to process pending chunk:',
+          error
+        );
         // 실패한 청크를 다시 큐에 넣음
         this.pendingQueue.unshift(chunk);
         break;
@@ -302,8 +330,11 @@ export class TransferController {
     }
 
     this.lastProgressReport = now;
-    
-    const progress = this.totalProcessed > 0 ? (this.totalProcessed / this.totalReceived) * 100 : 0;
+
+    const progress =
+      this.totalProcessed > 0
+        ? (this.totalProcessed / this.totalReceived) * 100
+        : 0;
     const elapsed = (now - this.startTime) / 1000;
     const speed = elapsed > 0 ? this.totalProcessed / elapsed : 0;
 
@@ -317,11 +348,14 @@ export class TransferController {
     try {
       // 남은 데이터 처리
       await this.processPendingQueue();
-      
+
       // Worker 최종화
       await this.sendToWorker('finalize', {});
-      
-      logInfo('[TransferController]', `Transfer completed: ${this.totalProcessed} bytes`);
+
+      logInfo(
+        '[TransferController]',
+        `Transfer completed: ${this.totalProcessed} bytes`
+      );
       this.onCompleteCallback?.(this.totalProcessed);
     } catch (error) {
       logError('[TransferController]', 'Failed to complete transfer:', error);
@@ -358,7 +392,7 @@ export class TransferController {
       isPaused: this.isPaused,
       pendingQueueSize: this.pendingQueue.length,
       totalReceived: this.totalReceived,
-      totalProcessed: this.totalProcessed
+      totalProcessed: this.totalProcessed,
     };
   }
 

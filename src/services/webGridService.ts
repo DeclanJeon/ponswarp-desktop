@@ -4,11 +4,7 @@
  * Tauri API 대신 WebSocket을 통해 부트스트랩 노드에 직접 연결
  */
 
-import {
-  GridInfo,
-  GridSwarmState,
-  GridPeerDiscoveredEvent,
-} from '../types/grid';
+import { GridInfo } from '../types/grid';
 
 // 웹 환경용 부트스트랩 노드 주소 (로컬 테스트용)
 const WEB_BOOTSTRAP_NODES = [
@@ -24,8 +20,8 @@ export async function connectWebBootstrapNode(
   address: string
 ): Promise<boolean> {
   try {
-    const [host, portStr] = address.split(':');
-    const port = parseInt(portStr);
+    const [host] = address.split(':');
+    // const port = parseInt(portStr);
 
     console.log(`[WebGrid] 부트스트랩 노드 연결 시도: ${address}`);
 

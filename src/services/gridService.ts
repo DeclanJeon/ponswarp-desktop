@@ -24,7 +24,6 @@ import {
   autoConnectWebBootstrap,
   setWebBootstrapNodes,
   getWebBootstrapNodes,
-  WebBootstrapNodeInfo,
 } from './webGridService';
 
 /**

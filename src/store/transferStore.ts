@@ -156,14 +156,14 @@ const initialState = {
     isPaused: false,
     queueSize: 0,
     highWaterMark: 16 * 1024 * 1024, // 16MB
-    lowWaterMark: 4 * 1024 * 1024,  // 4MB
+    lowWaterMark: 4 * 1024 * 1024, // 4MB
     lastPauseTime: null,
     lastResumeTime: null,
   },
 };
 
 export const useTransferStore = create<TransferState>()(
-  subscribeWithSelector((set, get) => ({
+  subscribeWithSelector((set, _get) => ({
     ...initialState,
 
     // 기본 setter
@@ -244,8 +244,12 @@ export const useTransferStore = create<TransferState>()(
         backpressure: {
           ...state.backpressure,
           isPaused,
-          lastPauseTime: isPaused ? Date.now() : state.backpressure.lastPauseTime,
-          lastResumeTime: !isPaused ? Date.now() : state.backpressure.lastResumeTime,
+          lastPauseTime: isPaused
+            ? Date.now()
+            : state.backpressure.lastPauseTime,
+          lastResumeTime: !isPaused
+            ? Date.now()
+            : state.backpressure.lastResumeTime,
         },
       })),
 

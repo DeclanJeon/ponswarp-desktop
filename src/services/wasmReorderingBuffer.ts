@@ -1,6 +1,5 @@
 import initPonsCore, {
   WasmReorderingBuffer as WasmBuffer,
-  init,
 } from 'pons-core-wasm';
 import { ReorderingBuffer } from './reorderingBuffer';
 import { logDebug, logWarn, logError } from '../utils/logger';

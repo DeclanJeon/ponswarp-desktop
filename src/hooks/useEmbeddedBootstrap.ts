@@ -15,7 +15,6 @@ import {
   isTauriEnvironment,
   type BootstrapConfig,
   type BootstrapStatus,
-  type BoundPorts,
   type BootstrapPeerDiscoveredEvent,
 } from '../services/embeddedBootstrap';
 import { logInfo, logError } from '../utils/logger';

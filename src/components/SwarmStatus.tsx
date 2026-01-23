@@ -5,7 +5,7 @@
  */
 
 import React from 'react';
-import { Users, ArrowDown, ArrowUp, Wifi, WifiOff } from 'lucide-react';
+import { Users, ArrowDown, ArrowUp, WifiOff } from 'lucide-react';
 
 export interface PeerInfo {
   peerId: string;

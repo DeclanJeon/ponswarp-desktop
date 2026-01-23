@@ -67,17 +67,19 @@ ctx.onmessage = async (e: MessageEvent) => {
 function initializeJob(inputFiles: File[], inputManifest: TransferManifest) {
   files = inputFiles;
   manifest = inputManifest;
-  
+
   // Reset pointers
   currentFileIndex = 0;
   currentOffset = 0;
   totalBytesSent = 0;
-  
+
   isPaused = false;
   isJobRunning = true;
 
-  console.log(`[SenderWorker] Initialized: ${files.length} files, Total: ${manifest.totalSize} bytes`);
-  
+  console.log(
+    `[SenderWorker] Initialized: ${files.length} files, Total: ${manifest.totalSize} bytes`
+  );
+
   // Signal main thread that we are ready
   ctx.postMessage({ type: 'init-complete' });
 }
@@ -103,7 +105,7 @@ async function processBatch(count: number) {
     // 2. Check File Boundary (Empty file skip or Move next)
     // If currentOffset reached fileSize, move to next file
     if (currentOffset >= fileSize) {
-      // If file size is 0, we still might need to send a header, 
+      // If file size is 0, we still might need to send a header,
       // but usually we just skip to next for data stream.
       // NOTE: Zero-byte files are handled by manifest structure on receiver side usually.
       currentFileIndex++;
@@ -126,7 +128,7 @@ async function processBatch(count: number) {
         fileIndex: currentFileIndex,
         offset: currentOffset,
         data: buffer,
-        size: buffer.byteLength
+        size: buffer.byteLength,
       });
 
       // Mark buffer for Zero-Copy transfer
@@ -135,12 +137,14 @@ async function processBatch(count: number) {
       // 6. Update Pointers
       currentOffset += readSize;
       totalBytesSent += readSize;
-
     } catch (err) {
-      console.error(`[SenderWorker] Read error at index ${currentFileIndex}:`, err);
-      ctx.postMessage({ 
-        type: 'error', 
-        payload: { message: `File read failed: ${(err as Error).message}` } 
+      console.error(
+        `[SenderWorker] Read error at index ${currentFileIndex}:`,
+        err
+      );
+      ctx.postMessage({
+        type: 'error',
+        payload: { message: `File read failed: ${(err as Error).message}` },
       });
       isJobRunning = false;
       return;
@@ -149,13 +153,16 @@ async function processBatch(count: number) {
 
   // 7. Send Batch to Main Thread
   if (chunksToSend.length > 0) {
-    ctx.postMessage({
-      type: 'chunk-batch',
-      payload: {
-        chunks: chunksToSend,
-        progressData: calculateProgress()
-      }
-    }, transferables); // <--- Key: Zero-Copy Transfer
+    ctx.postMessage(
+      {
+        type: 'chunk-batch',
+        payload: {
+          chunks: chunksToSend,
+          progressData: calculateProgress(),
+        },
+      },
+      transferables
+    ); // <--- Key: Zero-Copy Transfer
   }
 }
 
@@ -167,7 +174,7 @@ function calculateProgress() {
     return {
       progress: 0,
       bytesTransferred: 0,
-      totalBytes: 0
+      totalBytes: 0,
     };
   }
 
@@ -177,7 +184,7 @@ function calculateProgress() {
   return {
     progress: Math.min(100, progress),
     bytesTransferred: totalBytesSent,
-    totalBytes: manifest.totalSize
+    totalBytes: manifest.totalSize,
   };
 }
 

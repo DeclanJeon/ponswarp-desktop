@@ -305,7 +305,7 @@ class ErrorHandler {
 
   // 에러 로깅
   private logError(errorInfo: ErrorInfo): void {
-    const logLevel = this.getLogLevel(errorInfo.severity);
+    // const logLevel = this.getLogLevel(errorInfo.severity);
     const logMessage = `[${errorInfo.severity.toUpperCase()}] ${errorInfo.type}: ${errorInfo.message}`;
 
     const contextStr = errorInfo.context
@@ -403,7 +403,7 @@ class ErrorHandler {
       const stunController = new AbortController();
       const stunTimeout = setTimeout(() => stunController.abort(), 3000);
 
-      const stunResponse = await fetch('https://stun.l.google.com:19302', {
+      await fetch('https://stun.l.google.com:19302', {
         method: 'GET',
         mode: 'no-cors',
         signal: stunController.signal,

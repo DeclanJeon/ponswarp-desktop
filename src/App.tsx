@@ -33,10 +33,7 @@ import {
   RuntimeInfo,
 } from './utils/tauri';
 import { isWebRTCSupported } from './services/singlePeerConnection';
-import {
-  checkBootstrapNodeStatus,
-  getBootstrapNodeInstructions,
-} from './services/autoBootstrap';
+import { checkBootstrapNodeStatus } from './services/autoBootstrap';
 
 const App: React.FC = () => {
   const {
@@ -47,10 +44,10 @@ const App: React.FC = () => {
     setUseNativeTransfer,
     setWebRTCSupported: setStoreWebRTCSupported,
   } = useTransferStore();
-  const [nativeInfo, setNativeInfo] = useState<RuntimeInfo | null>(null);
+  const [, setNativeInfo] = useState<RuntimeInfo | null>(null);
   const [isNativeMode, setIsNativeMode] = useState(false);
-  const [webRTCSupported, setWebRTCSupported] = useState(true);
-  const [bootstrapNodeStatus, setBootstrapNodeStatus] = useState<any>(null);
+  const [, setWebRTCSupported] = useState(true);
+  const [, setBootstrapNodeStatus] = useState<any>(null);
 
   useEffect(() => {
     const path = window.location.pathname;
@@ -108,7 +105,7 @@ const App: React.FC = () => {
     return () => {
       cleanupNativeServices();
     };
-  }, []);
+  }, [setStoreWebRTCSupported, setUseNativeTransfer]);
 
   // 부트스트랩 노드 상태 확인
   useEffect(() => {

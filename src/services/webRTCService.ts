@@ -49,7 +49,7 @@ class ReceiverService {
 
   // 파일 쓰기
   private writer: IFileWriter | null = null;
-  
+
   // 🚀 [Backpressure] TransferController
   private transferController: TransferController | null = null;
 
@@ -207,7 +207,10 @@ class ReceiverService {
   /**
    * 🚀 [Backpressure] TransferController 설정 (Writer 대신 사용)
    */
-  public async setTransferController(fileName: string, fileSize: number): Promise<void> {
+  public async setTransferController(
+    fileName: string,
+    fileSize: number
+  ): Promise<void> {
     if (!this.peer) {
       throw new Error('Peer not connected');
     }
@@ -218,7 +221,6 @@ class ReceiverService {
     }
 
     // 새 TransferController 생성
-    // @ts-ignore - SimplePeer 인스턴스에 직접 접근
     this.transferController = new TransferController((this.peer as any).pc);
 
     // 이벤트 연결
@@ -226,24 +228,28 @@ class ReceiverService {
       this.emit('progress', {
         progress,
         speed,
-        bytesTransferred: this.transferController?.getStatus().totalProcessed || 0,
-        totalBytes: fileSize
+        bytesTransferred:
+          this.transferController?.getStatus().totalProcessed || 0,
+        totalBytes: fileSize,
       });
     });
 
-    this.transferController.onComplete((totalBytes) => {
+    this.transferController.onComplete(totalBytes => {
       this.emit('complete', { actualSize: totalBytes });
       this.notifyDownloadComplete();
     });
 
-    this.transferController.onError((error) => {
+    this.transferController.onError(error => {
       this.emit('error', error);
     });
 
     // 수신 시작
     await this.transferController.startReceiving(fileName, fileSize);
 
-    logInfo('[Receiver]', `TransferController set up for ${fileName} (${fileSize} bytes)`);
+    logInfo(
+      '[Receiver]',
+      `TransferController set up for ${fileName} (${fileSize} bytes)`
+    );
   }
 
   /**
