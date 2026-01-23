@@ -37,7 +37,7 @@
     "targets": "all",
     "windows": {
       "webviewInstallMode": {
-        "type": "embedBootstrapper"
+        "type": "downloadBootstrapper"
       }
     },
     "icon": [
