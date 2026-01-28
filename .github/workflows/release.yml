@@ -190,18 +190,83 @@ jobs:
       - name: Rename artifacts for uniqueness
         shell: bash
         run: |
-          # macOS: Rename .app.tar.gz to include architecture to avoid collision
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+
+          # macOS: Rename .app.tar.gz to include version and architecture
           if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
             echo "Renaming macOS artifacts..."
-            find src-tauri/target/${{ matrix.target }}/release/bundle/macos -name "*.app.tar.gz" -exec mv {} src-tauri/target/${{ matrix.target }}/release/bundle/macos/PonsWarp_${{ matrix.target }}.app.tar.gz \; || true
+            # Find .app.tar.gz files and rename them
+            find src-tauri/target/${{ matrix.target }}/release/bundle/macos -name "*.app.tar.gz" | while read -r file; do
+              # Extract original filename (e.g., PonsWarp.app.tar.gz)
+              filename=$(basename "$file")
+              # Construct new name: PonsWarp_1.2.3_x86_64-apple-darwin.app.tar.gz
+              new_name="${filename%.app.tar.gz}_${VERSION}_${{ matrix.target }}.app.tar.gz"
+              mv "$file" "$(dirname "$file")/$new_name"
+            done || true
+            
+            # Also rename DMG if it exists
+            find src-tauri/target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" | while read -r file; do
+              filename=$(basename "$file")
+              # Usually Tauri includes version in DMG, but we enforce architecture
+              # E.g., PonsWarp_1.2.3_x64.dmg -> PonsWarp_1.2.3_x86_64-apple-darwin.dmg
+              # Or if it's just PonsWarp_1.2.3.dmg
+              extension="${filename##*.}"
+              base="${filename%.*}"
+              new_name="${base}_${{ matrix.target }}.${extension}"
+              mv "$file" "$(dirname "$file")/$new_name"
+            done || true
           fi
 
-          # Linux: Rename binary to avoid collision
+          # Linux: Rename binary and bundles
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-             echo "Renaming Linux binary..."
+             echo "Renaming Linux artifacts..."
+             
+             # Rename raw binary
              if [ -f "src-tauri/target/${{ matrix.target }}/release/ponswarp" ]; then
-               mv "src-tauri/target/${{ matrix.target }}/release/ponswarp" "src-tauri/target/${{ matrix.target }}/release/ponswarp_${{ matrix.target }}"
+               mv "src-tauri/target/${{ matrix.target }}/release/ponswarp" "src-tauri/target/${{ matrix.target }}/release/ponswarp_${VERSION}_${{ matrix.target }}"
              fi
+             
+             # Rename AppImage
+             find src-tauri/target/${{ matrix.target }}/release/bundle/appimage -name "*.AppImage" | while read -r file; do
+               filename=$(basename "$file")
+               new_name="${filename%.AppImage}_${{ matrix.target }}.AppImage"
+               mv "$file" "$(dirname "$file")/$new_name"
+             done || true
+             
+             # Rename Deb
+             find src-tauri/target/${{ matrix.target }}/release/bundle/deb -name "*.deb" | while read -r file; do
+               filename=$(basename "$file")
+               new_name="${filename%.deb}_${{ matrix.target }}.deb"
+               mv "$file" "$(dirname "$file")/$new_name"
+             done || true
+             
+             # Rename Rpm
+             find src-tauri/target/${{ matrix.target }}/release/bundle/rpm -name "*.rpm" | while read -r file; do
+               filename=$(basename "$file")
+               new_name="${filename%.rpm}_${{ matrix.target }}.rpm"
+               mv "$file" "$(dirname "$file")/$new_name"
+             done || true
+          fi
+
+          # Windows: Rename MSI/NSIS
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+             echo "Renaming Windows artifacts..."
+             
+             # Rename MSI
+             find src-tauri/target/${{ matrix.target }}/release/bundle/msi -name "*.msi" | while read -r file; do
+               filename=$(basename "$file")
+               new_name="${filename%.msi}_${{ matrix.target }}.msi"
+               mv "$file" "$(dirname "$file")/$new_name"
+             done || true
+             
+             # Rename NSIS (Setup.exe)
+             find src-tauri/target/${{ matrix.target }}/release/bundle/nsis -name "*.exe" | while read -r file; do
+               filename=$(basename "$file")
+               # Usually "PonsWarp_1.2.3_x64-setup.exe"
+               # We append target for clarity if needed, or rely on Tauri naming
+               new_name="${filename%.exe}_${{ matrix.target }}.exe"
+               mv "$file" "$(dirname "$file")/$new_name"
+             done || true
           fi
 
       - name: Upload artifacts
