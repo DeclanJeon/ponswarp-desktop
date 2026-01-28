@@ -258,7 +258,7 @@ const SenderView: React.FC<SenderViewProps> = () => {
             files,
             data.peerId,
             batchId,
-            { zipRootDir }
+            { zipRootDir, forceZip: manifestRef.current?.isZipStream }
           );
 
           // 완료 처리
@@ -714,7 +714,13 @@ const SenderView: React.FC<SenderViewProps> = () => {
 
         return {
           file: dummyFile, // ScannedFile 타입 호환을 위한 더미 File 객체
-          path: item.relativePath || item.path, // Manifest에는 '상대 경로'를 넣어야 Receiver가 폴더 구조를 복원함
+          // Manifest용 경로 (단일 파일은 파일명만, 폴더는 상대 경로)
+          // 🚨 [FIX] 절대 경로를 넣으면 createManifest가 폴더로 오인하므로 주의
+          path:
+            item.relativePath ||
+            item.name ||
+            item.path?.split(/[\\/]/).pop() ||
+            'unknown',
           relativePath:
             item.relativePath || item.path?.split(/[\\/]/).pop() || fileName, // Zip 엔트리명용 상대 경로/파일명
           nativePath: item.nativePath || item.path, // 🆕 [FIX] 실제 전송 시 사용할 절대 경로
@@ -783,7 +789,13 @@ const SenderView: React.FC<SenderViewProps> = () => {
       setStatus('WAITING');
     }
 
-    const id = Math.random().toString(36).substring(2, 8).toUpperCase();
+    // 🚀 [FIX] Ambiguous characters removed (No 0, O, 1, I)
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let id = '';
+    for (let i = 0; i < 6; i++) {
+      id += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+
     setRoomId(id);
     setShareLink(`${window.location.origin}/receive/${id}`);
 

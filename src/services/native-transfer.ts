@@ -109,6 +109,9 @@ class NativeTransferService {
   // 🆕 Zip 스트리밍 상태
   private isZipping = false;
 
+  // 🆕 호스트 모드 여부 (Sender = true, Receiver = false)
+  private isHost = false;
+
   /**
    * 이벤트 리스너 설정
    */
@@ -341,6 +344,7 @@ class NativeTransferService {
    */
   async createRoom(roomId: string, manifest?: unknown): Promise<void> {
     this.currentRoomId = roomId;
+    this.isHost = true; // Sender는 호스트
 
     // 🆕 QUIC 서버 시작 (Sender는 수신 대기)
     try {
@@ -409,6 +413,7 @@ class NativeTransferService {
    */
   async joinRoom(roomId: string): Promise<void> {
     this.currentRoomId = roomId;
+    this.isHost = false; // Receiver는 게스트
 
     // 🆕 QUIC 서버 시작 (Receiver는 파일 수신 대기)
     try {
@@ -510,6 +515,16 @@ class NativeTransferService {
           `Sender 연결 시도: ${senderId} @ ${senderQuicAddress}`
         );
 
+        // 🆕 중복 연결 방지: 이미 해당 Sender와 연결되어 있다면 연결 시도 스킵
+        if (this.connected && this.currentPeerId === senderId) {
+          logInfo(
+            '[NativeTransfer]',
+            `이미 ${senderId}와 연결되어 있습니다. 연결 시도 스킵.`
+          );
+          this.emit('connected', { peerId: senderId });
+          return;
+        }
+
         // 🆕 [중요] 연결 시도 전 상태 초기화
         this.connected = false;
         this.currentPeerId = senderId;
@@ -559,7 +574,7 @@ class NativeTransferService {
     files: any[],
     peerId: string,
     jobId?: string,
-    options?: { zipRootDir?: string }
+    options?: { zipRootDir?: string; forceZip?: boolean }
   ): Promise<void> {
     if (this.isTransferring || this.isZipping) {
       logWarn('[NativeTransfer]', 'Transfer already in progress.');
@@ -573,11 +588,11 @@ class NativeTransferService {
 
     const transferId = jobId || `warp-${Date.now().toString(36)}`;
 
-    // 🆕 자동 분기: 다중 파일이면 Zip 스트리밍
-    if (files.length > 1) {
+    // 🆕 자동 분기: 다중 파일이거나 강제 Zip 모드이면 Zip 스트리밍
+    if (files.length > 1 || options?.forceZip) {
       logInfo(
         '[NativeTransfer]',
-        `🗜️ 다중 파일 감지 (${files.length}개) - Zip 스트리밍 모드 활성화`
+        `🗜️ Zip 스트리밍 모드 활성화 (Files: ${files.length}, ForceZip: ${options?.forceZip})`
       );
 
       this.isZipping = true;
@@ -803,6 +818,15 @@ class NativeTransferService {
     if (senderId) {
       logInfo('[NativeTransfer]', `Sender 발견: ${senderId}`);
       this.emit('sender-found', { senderId });
+    } else if (!this.isHost && users.length === 1) {
+      // 🆕 [ERROR] Receiver가 방에 혼자 있는 경우 -> Sender가 없음 (잘못된 코드)
+      logWarn(
+        '[NativeTransfer]',
+        '방에 Sender가 없습니다. 잘못된 방 번호일 수 있습니다.'
+      );
+      this.emit('error', {
+        message: 'Sender not found. Please check your Warp Key.',
+      });
     }
   }
 
@@ -832,6 +856,7 @@ class NativeTransferService {
         } else {
           logWarn('[NativeTransfer]', '⚠️ QUIC 연결 상태 확인 실패');
         }
+        return true;
       } else {
         logError('[NativeTransfer]', '❌ 피어 연결 실패: invoke 결과 false');
 

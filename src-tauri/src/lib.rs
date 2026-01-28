@@ -16,7 +16,7 @@ use protocol::Command;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Window};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
@@ -592,14 +592,14 @@ async fn get_file_transfer_state(
 async fn open_file_dialog(
     multiple: bool,
     directory: bool,
-    app: tauri::AppHandle,
+    window: tauri::Window,
 ) -> Result<Option<Vec<String>>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     if directory {
         // 폴더 선택 다이얼로그
         let (tx, rx) = tokio::sync::oneshot::channel();
-        app.dialog().file().pick_folder(move |result| {
+        window.dialog().file().pick_folder(move |result| {
             let _ = tx.send(result);
         });
 
@@ -615,7 +615,7 @@ async fn open_file_dialog(
         // 파일 선택 다이얼로그
         if multiple {
             let (tx, rx) = tokio::sync::oneshot::channel();
-            app.dialog().file().pick_files(move |result| {
+            window.dialog().file().pick_files(move |result| {
                 let _ = tx.send(result);
             });
 
@@ -629,7 +629,7 @@ async fn open_file_dialog(
             }
         } else {
             let (tx, rx) = tokio::sync::oneshot::channel();
-            app.dialog().file().pick_file(move |result| {
+            window.dialog().file().pick_file(move |result| {
                 let _ = tx.send(result);
             });
 
@@ -1138,13 +1138,13 @@ async fn complete_file_stream(file_id: String, final_size: Option<u64>) -> Resul
 #[tauri::command]
 async fn create_save_dialog(
     default_name: Option<String>,
-    app: tauri::AppHandle,
+    window: tauri::Window,
 ) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
 
-    app.dialog()
+    window.dialog()
         .file()
         .add_filter("All Files", &["*"])
         .set_file_name(default_name.unwrap_or_else(|| "received_file".to_string()))
@@ -1164,12 +1164,12 @@ async fn create_save_dialog(
 
 /// 🆕 저장 폴더 선택 다이얼로그
 #[tauri::command]
-async fn select_save_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
+async fn select_save_directory(window: tauri::Window) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
 
-    app.dialog().file().pick_folder(move |result| {
+    window.dialog().file().pick_folder(move |result| {
         let _ = tx.send(result);
     });
 
