@@ -41,7 +41,7 @@
       },
       "nsis": {
         "installMode": "perMachine",
-        "languages": ["en-US", "ko-KR"],
+        "languages": ["English", "Korean"],
         "displayLanguageSelector": true
       }
     },
