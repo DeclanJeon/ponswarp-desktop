@@ -89,7 +89,7 @@ jspm_packages/
 deploy.*
 ecosystem.config.*
 
-docs
+# docs
 nginx.conf
 nginx.conf.*
 
@@ -104,3 +104,8 @@ src-tauri/key.pub
 *.deb
 *.AppImage
 *.rpm
+
+docs
+architecture
+.sisyphus
+.github

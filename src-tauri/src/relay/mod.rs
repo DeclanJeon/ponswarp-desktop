@@ -1,3 +1,3 @@
 pub mod engine;
 
-pub use engine::{BufferPool, RelayEngine, RelaySession, RelayTarget};
+pub use engine::RelayEngine;

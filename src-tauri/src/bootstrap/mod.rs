@@ -11,3 +11,5 @@ pub mod stats;
 pub use config::BootstrapConfig;
 pub use service::{BootstrapStatus, BoundPorts, EmbeddedBootstrapService, ServiceState};
 pub use stats::{DhtStats, RelayStats, StatsCollector, StatsServer};
+pub use dht::{DhtHandle, PeerDiscoveredEvent, DhtNode};
+pub use relay::RelayServer;

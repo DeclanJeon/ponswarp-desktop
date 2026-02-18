@@ -160,7 +160,8 @@ impl QuicServer {
             quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?,
         ));
 
-        let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+        let transport_config = Arc::get_mut(&mut server_config.transport)
+            .ok_or_else(|| anyhow::anyhow!("failed to get mutable transport config"))?;
 
         // 🚀 [고속 전송] TB급 전송을 위한 멀티스트림 최적화
         // - 32개 동시 블록 전송 지원 (8MB 블록 × 32 = 256MB 동시 전송)
