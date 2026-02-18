@@ -1,5 +1,8 @@
-const fs = require('fs');
-const path = require('path');
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Paths
 const packageJsonPath = path.resolve(__dirname, '../package.json');
@@ -14,9 +17,18 @@ console.log(`Syncing version ${newVersion} to Tauri files...`);
 
 // 1. Update tauri.conf.json
 if (fs.existsSync(tauriConfPath)) {
-  const tauriConf = JSON.parse(fs.readFileSync(tauriConfPath, 'utf8'));
-  tauriConf.version = newVersion;
-  fs.writeFileSync(tauriConfPath, JSON.stringify(tauriConf, null, 2) + '\n');
+  const tauriConfSource = fs.readFileSync(tauriConfPath, 'utf8');
+  const versionUpdated = tauriConfSource.replace(
+    /\"version\"\s*:\s*\"[^\"]+\"/,
+    `\"version\": \"${newVersion}\"`
+  );
+
+  if (versionUpdated === tauriConfSource) {
+    console.error(`⚠ tauri.conf.json has no version field`);
+    process.exit(1);
+  }
+
+  fs.writeFileSync(tauriConfPath, versionUpdated);
   console.log(`✓ Updated tauri.conf.json`);
 } else {
   console.error(`❌ tauri.conf.json not found at ${tauriConfPath}`);

@@ -37,20 +37,13 @@ jobs:
         id: bump
         run: |
           # Bump patch version in package.json without git tag
+          # This runs scripts/version hook defined in package.json,
+          # which keeps tauri.conf.json and Cargo.toml synced.
           npm version patch --no-git-tag-version
 
-          # Get new version
+          # Get new version from package.json
           NEW_VERSION=$(node -p "require('./package.json').version")
           echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
-
-          # Update tauri.conf.json
-          # Use jq to update the version field
-          jq --arg v "$NEW_VERSION" '.version = $v' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp && mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
-
-          # Update Cargo.toml (if it exists and has version)
-          if [ -f "src-tauri/Cargo.toml" ]; then
-             sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" src-tauri/Cargo.toml
-          fi
 
       - name: Commit and Push
         run: |
