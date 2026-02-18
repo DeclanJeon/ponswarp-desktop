@@ -1,6 +1,6 @@
 [package]
 name = "ponswarp"
-version = "1.1.2"
+version = "1.1.29"
 description = "PonsWarp Enterprise - High-speed P2P file transfer"
 authors = ["PonsWarp Team"]
 license = "MIT"
@@ -35,6 +35,14 @@ mdns-sd = "0.10"
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
+tokio-test = "0.4"
+
+# TURN/STUN/ICE for external network P2P
+webrtc = "0.14"
+webrtc-ice = "0.14"
+webrtc-stun = "0.1"
+base64 = "0.22"
+chrono = "0.4"
 
 bytes = "1"
 anyhow = "1.0"

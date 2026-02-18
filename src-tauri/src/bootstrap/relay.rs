@@ -71,7 +71,8 @@ impl RelayServer {
             quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?,
         ));
 
-        let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+        let transport_config = Arc::get_mut(&mut server_config.transport)
+            .ok_or_else(|| anyhow::anyhow!("failed to get mutable transport config"))?;
         transport_config.max_idle_timeout(Some(Duration::from_secs(300).try_into()?));
 
         Ok((server_config, cert_der))

@@ -4,6 +4,7 @@ mod grid;
 mod protocol;
 mod quic;
 mod relay;
+mod turn;
 mod transfer;
 
 // 파일 스트림 관리자 (다중 파일 지원)
@@ -1350,7 +1351,7 @@ async fn start_embedded_bootstrap(
 
     // 이미 실행 중인지 확인
     if let Some(ref service) = *bootstrap_guard {
-        if service.state() != &bootstrap::ServiceState::Stopped {
+        if service.state().await != bootstrap::ServiceState::Stopped {
             return Err("부트스트랩 서비스가 이미 실행 중입니다".to_string());
         }
     }
@@ -1437,6 +1438,8 @@ async fn get_embedded_bootstrap_status(
             },
             connected_bootstrap_nodes: 0,
             discovered_peers: 0,
+            turn_enabled: false,
+            turn_connection_stats: None,
         })
     }
 }
@@ -1458,7 +1461,7 @@ async fn update_bootstrap_config(
     let mut bootstrap_guard = state.embedded_bootstrap.write().await;
 
     if let Some(ref mut service) = *bootstrap_guard {
-        let was_running = service.state() == &bootstrap::ServiceState::Running;
+        let was_running = service.state().await == bootstrap::ServiceState::Running;
 
         // 재시작이 필요한 경우
         if restart && was_running {
@@ -1468,7 +1471,7 @@ async fn update_bootstrap_config(
                 .map_err(|e| format!("부트스트랩 중지 실패: {}", e))?;
         }
 
-        service.update_config(config.clone());
+        service.update_config(config.clone()).await;
 
         // 재시작
         if restart && was_running {

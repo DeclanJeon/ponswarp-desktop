@@ -110,16 +110,14 @@ impl StatsServer {
         let addrs = [format!("127.0.0.1:{}", port), format!("0.0.0.0:{}", port)];
 
         let mut listener = None;
-        let mut local_addr = None;
-
         for addr in &addrs {
             match TcpListener::bind(addr).await {
                 Ok(l) => {
-                    local_addr = Some(l.local_addr()?);
+                    let bound_addr = l.local_addr()?;
                     listener = Some(l);
                     info!(
                         "📊 통계 API 서버 시작: {} (바인딩 주소: {})",
-                        local_addr.unwrap(),
+                        bound_addr,
                         addr
                     );
                     break;
@@ -131,7 +129,6 @@ impl StatsServer {
         }
 
         let listener = listener.ok_or_else(|| anyhow::anyhow!("모든 주소에 바인딩 실패"))?;
-        let local_addr = local_addr.unwrap();
 
         Ok(Self { listener, stats })
     }

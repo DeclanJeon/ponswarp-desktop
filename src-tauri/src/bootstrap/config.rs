@@ -5,29 +5,20 @@ use serde::{Deserialize, Serialize};
 /// 내장 부트스트랩 노드 설정
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootstrapConfig {
-    /// 내장 부트스트랩 활성화 여부
     pub enabled: bool,
-
-    /// DHT 포트 (0 = 자동 선택)
     pub dht_port: u16,
-
-    /// QUIC 릴레이 포트 (0 = 자동 선택)
     pub quic_port: u16,
-
-    /// Stats API 포트 (0 = 자동 선택)
     pub stats_port: u16,
-
-    /// 외부 부트스트랩 노드 주소 목록
     pub external_bootstrap_nodes: Vec<String>,
-
-    /// mDNS 자동 발견 활성화
     pub enable_mdns_discovery: bool,
-
-    /// 릴레이 서비스 활성화
     pub enable_relay: bool,
-
-    /// 최대 릴레이 세션 수
     pub max_relay_sessions: usize,
+    pub enable_turn: bool,
+    pub turn_server_url: Option<String>,
+    pub turn_realm: Option<String>,
+    pub turn_username: Option<String>,
+    pub turn_password: Option<String>,
+    pub turn_secret: Option<String>,
 }
 
 impl Default for BootstrapConfig {
@@ -41,6 +32,12 @@ impl Default for BootstrapConfig {
             enable_mdns_discovery: true,
             enable_relay: true,
             max_relay_sessions: 50,
+            enable_turn: false,
+            turn_server_url: None,
+            turn_realm: None,
+            turn_username: None,
+            turn_password: None,
+            turn_secret: None,
         }
     }
 }

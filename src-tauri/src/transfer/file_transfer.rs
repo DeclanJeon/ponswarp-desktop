@@ -125,7 +125,7 @@ impl TransferApprovalManager {
             reason,
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_secs(),
         };
 
@@ -609,7 +609,7 @@ pub fn start_native_file_stream(
     state
         .file_streams
         .lock()
-        .unwrap()
+        .map_err(|_| "File stream state lock poisoned".to_string())?
         .insert(file_id.clone(), file);
 
     println!("[Rust] File stream started: {}", save_path);
@@ -624,7 +624,10 @@ pub fn write_native_file_chunk(
     chunk: Vec<u8>,
     offset: i64,
 ) -> Result<(), String> {
-    let mut streams = state.file_streams.lock().unwrap();
+    let mut streams = state
+        .file_streams
+        .lock()
+        .map_err(|_| "File stream state lock poisoned".to_string())?;
 
     if let Some(file) = streams.get_mut(&file_id) {
         // Offset이 -1이면 현재 위치(Append), 아니면 Seek
@@ -653,7 +656,10 @@ pub fn close_native_file_stream(
     state: tauri::State<'_, FileStreamManager>,
     file_id: String,
 ) -> Result<(), String> {
-    let mut streams = state.file_streams.lock().unwrap();
+    let mut streams = state
+        .file_streams
+        .lock()
+        .map_err(|_| "File stream state lock poisoned".to_string())?;
 
     if let Some(file) = streams.remove(&file_id) {
         // File은 Scope를 벗어나면 자동으로 close되지만, 확실하게 sync() 호출

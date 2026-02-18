@@ -36,7 +36,7 @@ impl QuicClient {
         Ok(conn)
     }
 
-    pub async fn send_command(&self, conn: &quinn::Connection, cmd: Command) -> Result<Command> {
+    pub async fn send_command(&self, conn: &quinn::Connection, cmd: Command) -> anyhow::Result<Command> {
         let (mut send, mut recv) = conn.open_bi().await?;
 
         let cmd_bytes = cmd.to_bytes()?;
@@ -49,7 +49,7 @@ impl QuicClient {
         Ok(response)
     }
 
-    pub async fn ping(&self, conn: &quinn::Connection) -> Result<bool> {
+    pub async fn ping(&self, conn: &quinn::Connection) -> anyhow::Result<bool> {
         match self.send_command(conn, Command::Ping).await? {
             Command::Pong => Ok(true),
             _ => Ok(false),
