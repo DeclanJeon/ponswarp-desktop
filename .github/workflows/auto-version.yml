@@ -3,7 +3,7 @@ name: Auto Version Bump
 on:
   push:
     branches:
-      - main
+      - master
     paths-ignore:
       - 'package.json'
       - 'src-tauri/tauri.conf.json'
@@ -57,5 +57,5 @@ jobs:
           git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
           git commit -m "chore: bump version to ${{ env.NEW_VERSION }}"
           git tag "v${{ env.NEW_VERSION }}"
-          git push origin main
+          git push origin master
           git push origin "v${{ env.NEW_VERSION }}"
